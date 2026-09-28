@@ -1,0 +1,42 @@
+* { box-sizing: border-box; }
+body { margin: 0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #eef2f7; color: #0f172a; }
+.app-shell { height: 100vh; display: flex; flex-direction: column; }
+header { display: flex; align-items: center; gap: 10px; padding: 12px 18px; background: #0f172a; color: white; }
+header h1 { font-size: 18px; margin: 0; }
+header p { margin: 2px 0 0; color: #cbd5e1; font-size: 12px; }
+header input { min-width: 220px; padding: 8px; border-radius: 8px; border: 1px solid #334155; }
+button { border: 0; border-radius: 8px; padding: 8px 12px; background: #e2e8f0; color: #0f172a; cursor: pointer; font-weight: 600; }
+button:hover { filter: brightness(0.96); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.primary, .manual-panel button:first-of-type { background: #0891b2; color: white; }
+main { flex: 1; display: grid; grid-template-columns: 1fr 360px; min-height: 0; }
+.canvas { position: relative; }
+.inspector { background: white; border-left: 1px solid #cbd5e1; padding: 16px; overflow: auto; }
+.inspector h2 { margin-top: 0; font-size: 18px; }
+.button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.hint { color: #64748b; font-size: 12px; line-height: 1.5; }
+label { display: grid; gap: 6px; margin: 12px 0; font-size: 13px; font-weight: 600; }
+input, textarea, select { width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px; font: inherit; }
+pre { background: #0f172a; color: #d1fae5; padding: 10px; border-radius: 8px; min-height: 70px; max-height: 220px; overflow: auto; white-space: pre-wrap; }
+.workflow-node { width: 190px; min-height: 96px; border-radius: 12px; background: white; border: 2px solid #cbd5e1; padding: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, .12); }
+.workflow-node.selected { border-color: #0891b2; }
+.workflow-node.status-success { border-color: #16a34a; }
+.workflow-node.status-failed { border-color: #dc2626; }
+.workflow-node.status-waiting { border-color: #d97706; }
+.workflow-node.status-stale { opacity: .72; }
+.node-kind { font-size: 11px; color: #2563eb; font-weight: 800; letter-spacing: .05em; }
+.workflow-node strong, .workflow-node small { display: block; margin-top: 4px; }
+.workflow-node small { color: #64748b; }
+.workflow-node em { display: block; color: #dc2626; font-size: 11px; margin-top: 5px; font-style: normal; }
+.message { padding: 10px 18px; background: #fef3c7; border-bottom: 1px solid #f59e0b; color: #78350f; }
+.run-status { position: absolute; top: 12px; left: 12px; padding: 8px 12px; border-radius: 999px; color: white; font-weight: 700; z-index: 10; background: #64748b; }
+.run-status.success { background: #16a34a; }
+.run-status.failed { background: #dc2626; }
+.run-status.waiting { background: #d97706; }
+.manual-panel { position: absolute; left: 12px; bottom: 12px; width: 360px; display: flex; gap: 8px; align-items: center; padding: 12px; border-radius: 12px; background: white; box-shadow: 0 12px 30px rgba(15, 23, 42, .2); z-index: 10; }
+.pill { display: inline-block; padding: 5px 10px; border-radius: 999px; background: #e2e8f0; font-weight: 700; }
+.pill.success { background: #dcfce7; color: #166534; }
+.pill.failed { background: #fee2e2; color: #991b1b; }
+.pill.waiting { background: #fef3c7; color: #92400e; }
+.error { color: #dc2626; font-size: 12px; }
+.edge-row { padding: 7px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }

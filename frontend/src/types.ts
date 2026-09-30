@@ -49,6 +49,7 @@ export type Artifact = {
   nodeId: string;
   version: string;
   runId: string;
+  projectVersion?: string;
   path?: string;
   content?: string;
   rows: Record<string, unknown>[];
@@ -60,6 +61,7 @@ export type NodeRunResult = {
   artifact?: Artifact;
   error?: string;
   reusedFrom?: string;
+  basis?: string;
 };
 export type RunResult = {
   ok: boolean;
@@ -70,3 +72,10 @@ export type RunResult = {
   issues?: Issue[];
 };
 export type SavedProjectResponse = { project: Project; validation: Validation };
+export type LoadedProjectResponse = {
+  project: Project;
+  artifacts: Record<string, Artifact>;
+  latestRun?: RunResult;
+  hasRun: boolean;
+  projectVersion: string;
+};

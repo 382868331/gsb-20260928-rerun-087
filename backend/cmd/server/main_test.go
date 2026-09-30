@@ -84,3 +84,58 @@ func TestInvalidProjectDoesNotRun(t *testing.T) {
 		t.Fatal("invalid project must not replace executable revision")
 	}
 }
+
+func TestLatestRunPersistedAndVersionAlignsOnReopen(t *testing.T) {
+	directory := t.TempDir()
+	store, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := buildMux(store)
+	encoded, _ := json.Marshal(sampleProject())
+	serve := func(method string, path string, body []byte) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, path, bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := serve(http.MethodPost, "/api/projects", encoded); response.Code != http.StatusOK {
+		t.Fatalf("save status = %d", response.Code)
+	}
+	runResponse := serve(http.MethodPost, "/api/projects/http-test/run", []byte(`{"startNodeIds":[]}`))
+	if runResponse.Code != http.StatusOK {
+		t.Fatalf("run status = %d body=%s", runResponse.Code, runResponse.Body.String())
+	}
+	var firstRun flow.RunResult
+	json.NewDecoder(runResponse.Body).Decode(&firstRun)
+
+	latest := serve(http.MethodGet, "/api/projects/http-test/runs/latest", nil)
+	if latest.Code != http.StatusOK {
+		t.Fatalf("latest run status = %d", latest.Code)
+	}
+	var latestEnvelope struct {
+		Exists bool           `json:"exists"`
+		Run    flow.RunResult `json:"run"`
+	}
+	json.NewDecoder(latest.Body).Decode(&latestEnvelope)
+	if !latestEnvelope.Exists || latestEnvelope.Run.RunID != firstRun.RunID {
+		t.Fatalf("latest run not persisted: %#v", latestEnvelope)
+	}
+
+	changed := sampleProject()
+	changed.Nodes[0].Params["content"] = "id,city" + "\n" + "9,Z"
+	changedBytes, _ := json.Marshal(changed)
+	if response := serve(http.MethodPost, "/api/projects", changedBytes); response.Code != http.StatusOK {
+		t.Fatalf("second save status = %d", response.Code)
+	}
+	reopenedStore, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopenedStore.runs["http-test"].ProjectVersion == flow.ProjectVersion(reopenedStore.projects["http-test"]) {
+		t.Fatal("saved run version should differ from the modified project version")
+	}
+	if reopenedStore.artifacts["http-test"]["in"].ProjectVersion != firstRun.ProjectVersion {
+		t.Fatal("persisted artifact must retain the run project version for reopen comparison")
+	}
+}

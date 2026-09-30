@@ -49,10 +49,13 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			artifact, exists := artifacts[nodeID]
 			if !exists {
 				ok = false
-				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物"}
+				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "没有可复用的上一轮产物，且不在本轮重算范围内", Basis: "等待上游重算后才能执行"}
 				continue
 			}
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID}
+			results[nodeID] = NodeResult{
+				NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID,
+				Basis: fmt.Sprintf("沿用 %s 的产物：本步骤参数及其全部数据上游均未变化，节点版本 %s 一致", artifact.RunID, artifact.Version),
+			}
 			continue
 		}
 		upstreamRows := make([]Row, 0)
@@ -74,19 +77,28 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		}
 		if blockedBy != "" {
 			ok = false
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: fmt.Sprintf("上游 %s 本轮未产出有效数据，拒绝使用旧结果", blockedBy)}
+			upstreamResult := results[blockedBy]
+			reason := upstreamResult.Error
+			if reason == "" {
+				reason = "上游本轮未产出有效数据"
+			}
+			results[nodeID] = NodeResult{
+				NodeID: nodeID, Status: "blocked",
+				Error: fmt.Sprintf("上游步骤 %s 失败或被阻断（%s），本步骤拒绝沿用旧产物", blockedBy, reason),
+				Basis: fmt.Sprintf("阻断链路：%s → %s", blockedBy, nodeID),
+			}
 			delete(artifacts, nodeID)
 			continue
 		}
-		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, outputRoot)
+		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, projectVersion, outputRoot)
 		if err != nil {
 			ok = false
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error()}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Basis: "本轮新执行"}
 			delete(artifacts, nodeID)
 			continue
 		}
 		artifacts[nodeID] = artifact
-		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact}
+		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Basis: "本轮新执行：参数与数据依赖已检查通过"}
 	}
 
 	affectedList := make([]string, 0, len(affected))
@@ -97,7 +109,7 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results}
 }
 
-func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, runID string, outputRoot string) (Artifact, error) {
+func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, runID string, projectVersion string, outputRoot string) (Artifact, error) {
 	version := nodeVersion(node, upstreamVersions)
 	var rows []Row
 	var summary string
@@ -139,7 +151,7 @@ func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, 
 	default:
 		return Artifact{}, fmt.Errorf("未知组件：%s", node.Type)
 	}
-	return Artifact{NodeID: node.ID, Version: version, RunID: runID, Path: outputPath, Content: content, Rows: rows, Summary: summary}, nil
+	return Artifact{NodeID: node.ID, Version: version, RunID: runID, ProjectVersion: projectVersion, Path: outputPath, Content: content, Rows: rows, Summary: summary}, nil
 }
 
 func parseRows(format string, content string) ([]Row, error) {
@@ -277,4 +289,8 @@ func hashProject(project Project) string {
 	encoded, _ := json.Marshal(project)
 	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:16])
+}
+
+func ProjectVersion(project Project) string {
+	return hashProject(project)
 }

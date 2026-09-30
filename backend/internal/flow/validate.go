@@ -84,6 +84,9 @@ func Validate(project Project) ValidationResult {
 		if component.Type == "file_output" && len(incoming[node.ID]) == 0 {
 			issues = append(issues, Issue{Code: "missing_data_dependency", NodeID: node.ID, Message: "文件输出必须连接数据表"})
 		}
+		if component.Type == "transform" && len(incoming[node.ID]) == 0 {
+			issues = append(issues, Issue{Code: "missing_data_dependency", NodeID: node.ID, Message: fmt.Sprintf("%s 缺少数据输入连线，参数不能替代数据依赖", node.Name)})
+		}
 	}
 
 	order, cycle := topologicalOrder(project.Nodes, outgoing, incoming)

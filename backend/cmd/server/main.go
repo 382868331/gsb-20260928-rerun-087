@@ -19,15 +19,17 @@ type store struct {
 	outputDir string
 	projects  map[string]flow.Project
 	artifacts map[string]map[string]flow.Artifact
+	runs      map[string]flow.RunResult
 }
 
 type savedEnvelope struct {
 	Projects  map[string]flow.Project             `json:"projects"`
 	Artifacts map[string]map[string]flow.Artifact `json:"artifacts"`
+	Runs      map[string]flow.RunResult           `json:"runs"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, runs: map[string]flow.RunResult{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -45,6 +47,9 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.Artifacts != nil {
 		s.artifacts = envelope.Artifacts
 	}
+	if envelope.Runs != nil {
+		s.runs = envelope.Runs
+	}
 	return s, nil
 }
 
@@ -52,7 +57,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Runs: s.runs}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -137,7 +142,18 @@ func buildMux(store *store) *http.ServeMux {
 			writeError(w, http.StatusNotFound, "工程不存在")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id]})
+		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "projectVersion": flow.ProjectVersion(project)})
+	})
+	mux.HandleFunc("GET /api/projects/{id}/runs/latest", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		run, exists := store.runs[id]
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "exists": exists})
 	})
 	mux.HandleFunc("POST /api/projects/{id}/run", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
@@ -173,6 +189,11 @@ func buildMux(store *store) *http.ServeMux {
 				delete(store.artifacts[id], nodeID)
 			}
 		}
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		store.runs[id] = result
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return

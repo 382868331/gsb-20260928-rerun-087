@@ -56,13 +56,14 @@ type Field struct {
 }
 
 type Artifact struct {
-	NodeID  string `json:"nodeId"`
-	Version string `json:"version"`
-	RunID   string `json:"runId"`
-	Path    string `json:"path,omitempty"`
-	Content string `json:"content,omitempty"`
-	Rows    []Row  `json:"rows"`
-	Summary string `json:"summary"`
+	NodeID         string `json:"nodeId"`
+	Version        string `json:"version"`
+	RunID          string `json:"runId"`
+	ProjectVersion string `json:"projectVersion,omitempty"`
+	Path           string `json:"path,omitempty"`
+	Content        string `json:"content,omitempty"`
+	Rows           []Row  `json:"rows"`
+	Summary        string `json:"summary"`
 }
 
 type Row map[string]any
@@ -93,6 +94,7 @@ type NodeResult struct {
 	Artifact   *Artifact `json:"artifact,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	ReusedFrom string    `json:"reusedFrom,omitempty"`
+	Basis      string    `json:"basis,omitempty"`
 }
 
 type RunResult struct {

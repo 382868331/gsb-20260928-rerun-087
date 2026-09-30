@@ -1,9 +1,18 @@
 import type { ComponentDef, Project, ProjectEdge, ProjectNode } from "./types";
 
-export const emptyProject = (): Project => ({
+export const blankProject = (): Project => ({
+  format: "dataflow.project/v1",
+  id: "blank-" + Date.now(),
+  name: "空白工程",
+  revision: 0,
+  nodes: [],
+  edges: []
+});
+
+export const sampleProject = (): Project => ({
   format: "dataflow.project/v1",
   id: "first-dataflow",
-  name: "第一轮：文件输入到输出",
+  name: "自带样例：分支与汇合",
   revision: 0,
   nodes: [
     { id: "input-1", type: "file_input", name: "读取订单 CSV", position: { x: 50, y: 130 }, params: { fileName: "orders.csv", format: "csv", content: "id,city,amount\n1001,Shanghai,88\n1002,Beijing,42\n1003,Shanghai,120" } },
@@ -38,14 +47,15 @@ export function createNode(component: ComponentDef, count: number): ProjectNode 
   };
 }
 
-export function downstreamIds(project: Project, changedIds: string[]): Set<string> {
+export function downstreamIds(project: Project, changedIds: string[], edgeOverride?: Project["edges"]): Set<string> {
   const affected = new Set<string>();
   const queue = [...changedIds];
+  const edges = edgeOverride ?? project.edges;
   while (queue.length) {
     const current = queue.shift()!;
     if (affected.has(current)) continue;
     affected.add(current);
-    project.edges.filter((edge) => edge.source === current).forEach((edge) => queue.push(edge.target));
+    edges.filter((edge) => edge.source === current).forEach((edge) => queue.push(edge.target));
   }
   return affected;
 }

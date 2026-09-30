@@ -28,6 +28,7 @@ export function StepNode({ data }: NodeProps) {
       <small>{step.component?.name ?? step.node.type}</small>
       <div className="step-state">{step.stale ? "结果失效" : result ? statusText[result.status] : "未运行"}</div>
       {result?.error && <em>{result.error}</em>}
+      {result?.status === "reused" && result.basis && <em className="reuse-basis">复用依据：{result.basis}</em>}
       {step.component?.outputs.map((port) => <Handle key={port.id} id={port.id} type="source" position={Position.Right} />)}
     </div>
   );

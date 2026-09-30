@@ -27,6 +27,10 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			affected[nodeID] = true
 		}
 	}
+	started := make(map[string]bool)
+	for _, nodeID := range startNodeIDs {
+		started[nodeID] = true
+	}
 	projectVersion := hashProject(project)
 	results := make(map[string]NodeResult)
 	artifacts := make(map[string]Artifact)
@@ -49,10 +53,10 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			artifact, exists := artifacts[nodeID]
 			if !exists {
 				ok = false
-				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物"}
+				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物", Reason: "不在本轮重算范围内，也找不到可复用的旧产物"}
 				continue
 			}
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID, Reason: fmt.Sprintf("参数与上游产物版本未变，复用 %s 的产物（版本 %s）", artifact.RunID, artifact.Version)}
 			continue
 		}
 		upstreamRows := make([]Row, 0)
@@ -74,19 +78,27 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		}
 		if blockedBy != "" {
 			ok = false
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: fmt.Sprintf("上游 %s 本轮未产出有效数据，拒绝使用旧结果", blockedBy)}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: fmt.Sprintf("上游 %s 本轮未产出有效数据，拒绝使用旧结果", blockedBy), Reason: "依赖的上游失败或缺失，本轮不会沿用旧产物"}
 			delete(artifacts, nodeID)
 			continue
+		}
+		reason := "整流程运行，本轮全部重算"
+		if len(startNodeIDs) > 0 {
+			if started[nodeID] {
+				reason = "从本步骤开始的局部重跑"
+			} else {
+				reason = "上游发生变化，连带重算"
+			}
 		}
 		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, outputRoot)
 		if err != nil {
 			ok = false
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error()}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Reason: "执行失败，已阻断下游并清除旧产物"}
 			delete(artifacts, nodeID)
 			continue
 		}
 		artifacts[nodeID] = artifact
-		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact}
+		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason}
 	}
 
 	affectedList := make([]string, 0, len(affected))

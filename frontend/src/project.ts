@@ -22,6 +22,15 @@ export const emptyProject = (): Project => ({
   ]
 });
 
+export const blankProject = (): Project => ({
+  format: "dataflow.project/v1",
+  id: "blank-dataflow",
+  name: "空工程",
+  revision: 0,
+  nodes: [],
+  edges: []
+});
+
 export function defaultParams(component: ComponentDef): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   for (const field of component.params) params[field.id] = field.type === "select" ? field.options?.[0] ?? "" : "";

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"dataflow-designer/internal/flow"
@@ -29,7 +31,7 @@ func TestSaveRunAndReloadProject(t *testing.T) {
 		t.Fatal(err)
 	}
 	encoded, _ := json.Marshal(sampleProject())
-	handler := buildMux(store)
+	handler := buildMux(store, "")
 	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(encoded))
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -70,7 +72,7 @@ func TestInvalidProjectDoesNotRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := buildMux(store)
+	handler := buildMux(store, "")
 	project := sampleProject()
 	project.Edges = append(project.Edges, flow.Edge{ID: "cycle", Source: "out", Target: "in", SourcePort: "rows", TargetPort: "rows"})
 	encoded, _ := json.Marshal(project)
@@ -82,5 +84,31 @@ func TestInvalidProjectDoesNotRun(t *testing.T) {
 	}
 	if _, exists := store.projects[project.ID]; exists {
 		t.Fatal("invalid project must not replace executable revision")
+	}
+}
+
+func TestStaticSpaFallback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>app</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := newStore(filepath.Join(t.TempDir(), "store.json"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := buildMux(store, dir)
+	for _, path := range []string{"/", "/some/spa/route"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "app</html>") {
+			t.Fatalf("GET %s = %d, want index.html", path, response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("api must not be shadowed by static handler: %d", response.Code)
 	}
 }

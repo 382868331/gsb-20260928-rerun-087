@@ -59,6 +59,7 @@ export type NodeRunResult = {
   status: "succeeded" | "failed" | "blocked" | "reused";
   artifact?: Artifact;
   error?: string;
+  reason?: string;
   reusedFrom?: string;
 };
 export type RunResult = {

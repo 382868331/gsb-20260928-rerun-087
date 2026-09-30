@@ -88,6 +88,31 @@ func TestLocalRunReusesUnaffectedBranch(t *testing.T) {
 	}
 }
 
+func TestRunReportsReuseReasons(t *testing.T) {
+	project := testProject()
+	first := Run(project, "run-1", nil, nil, t.TempDir())
+	if !first.OK {
+		t.Fatal("first run should succeed")
+	}
+	stored := map[string]Artifact{}
+	for nodeID, result := range first.Results {
+		stored[nodeID] = *result.Artifact
+	}
+	second := Run(project, "run-2", []string{"b"}, stored, t.TempDir())
+	if !second.OK {
+		t.Fatal("second run should succeed")
+	}
+	if got := second.Results["a"].Reason; !strings.Contains(got, "复用") {
+		t.Fatalf("unaffected node should explain reuse, got %q", got)
+	}
+	if got := second.Results["b"].Reason; !strings.Contains(got, "局部重跑") {
+		t.Fatalf("start node should explain local rerun, got %q", got)
+	}
+	if got := second.Results["m"].Reason; !strings.Contains(got, "连带重算") {
+		t.Fatalf("downstream should explain recomputation, got %q", got)
+	}
+}
+
 func TestParametersAndDataEdgesAreDistinct(t *testing.T) {
 	project := testProject()
 	validation := Validate(project)

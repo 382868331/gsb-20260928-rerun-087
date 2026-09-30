@@ -92,6 +92,7 @@ type NodeResult struct {
 	Status     string    `json:"status"`
 	Artifact   *Artifact `json:"artifact,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
 	ReusedFrom string    `json:"reusedFrom,omitempty"`
 }
 

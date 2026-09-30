@@ -1,4 +1,5 @@
 import type { Project, RunResult } from "../types";
+import { statusText } from "./StepNode";
 
 type Props = { project: Project; selectedId?: string; run?: RunResult };
 
@@ -25,5 +26,12 @@ export function DataPanel({ project, selectedId, run }: Props) {
       </>
     )}
     {run && <div className="scope"><b>本轮范围：</b>{run.affectedNodeIds.map((id) => project.nodes.find((node) => node.id === id)?.name ?? id).join(" → ")}</div>}
+    {run && <div className="reuse-report"><b>分支复用说明</b>
+      {project.nodes.map((node) => {
+        const stepResult = run.results[node.id];
+        if (!stepResult) return null;
+        return <div key={node.id} className={"reuse-row " + stepResult.status}><span>{node.name}</span><b>{statusText[stepResult.status] ?? stepResult.status}</b><em>{stepResult.reason ?? stepResult.error ?? ""}</em></div>;
+      })}
+    </div>}
   </section>;
 }

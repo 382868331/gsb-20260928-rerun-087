@@ -9,7 +9,7 @@ export type StepNodeData = {
   selected: boolean;
 };
 
-const statusText: Record<string, string> = {
+export const statusText: Record<string, string> = {
   succeeded: "成功",
   failed: "失败",
   blocked: "已阻断",

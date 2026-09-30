@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Background, Controls, ReactFlow, addEdge, useEdgesState, useNodesState, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "./api";
-import { createNode, downstreamIds, emptyProject, toReactEdge } from "./project";
+import { blankProject, createNode, downstreamIds, emptyProject, toReactEdge } from "./project";
 import { DataPanel } from "./components/DataPanel";
 import { Inspector } from "./components/Inspector";
 import { StepNode, type StepNodeData } from "./components/StepNode";
@@ -35,7 +35,7 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState(project.edges.map(toReactEdge));
   useEffect(() => { setNodes(flowNodes); }, [flowNodes, setNodes]);
   useEffect(() => { setEdges(project.edges.map(toReactEdge)); }, [project.edges, setEdges]);
-  useEffect(() => { api.components().then(setComponents); }, []);
+  useEffect(() => { api.components().then(setComponents).catch(() => setMessage("无法连接后端：组件目录加载失败，请确认服务已启动。")); }, []);
 
   const selectedNode = project.nodes.find((node) => node.id === selectedId);
   const selectedComponent = components.find((component) => component.type === selectedNode?.type);
@@ -88,8 +88,22 @@ export default function App() {
     }, [...ids]);
   };
 
+  function newBlank() {
+    setProject(blankProject());
+    setRun(undefined);
+    setValidation(undefined);
+    setDirtyIds(new Set());
+    setMessage("已新建空工程：从左侧添加组件并连线，保存后即可执行。");
+  }
+
   async function save() {
-    const response = await api.saveProject(project) as { project?: Project; validation: Validation };
+    let response: { project?: Project; validation: Validation };
+    try {
+      response = await api.saveProject(project) as { project?: Project; validation: Validation };
+    } catch {
+      setMessage("无法连接后端：保存失败，页面状态未变更。");
+      return;
+    }
     setValidation(response.validation);
     if (response.project) {
       setProject(response.project);
@@ -100,14 +114,26 @@ export default function App() {
   }
 
   async function execute(startNodeIds: string[]) {
-    const saveResponse = await api.saveProject(project) as { project?: Project; validation: Validation };
+    let saveResponse: { project?: Project; validation: Validation };
+    try {
+      saveResponse = await api.saveProject(project) as { project?: Project; validation: Validation };
+    } catch {
+      setMessage("无法连接后端：运行器没有启动，页面保留当前状态。");
+      return;
+    }
     setValidation(saveResponse.validation);
     if (!saveResponse.project) {
       setMessage("流程校验失败，运行器没有启动。");
       return;
     }
     setProject(saveResponse.project);
-    const result = await api.run(saveResponse.project.id, startNodeIds);
+    let result: RunResult;
+    try {
+      result = await api.run(saveResponse.project.id, startNodeIds);
+    } catch {
+      setMessage("运行请求失败：后端不可用，本轮没有产生新结果。");
+      return;
+    }
     setRun(result);
     setDirtyIds(new Set());
     setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
@@ -127,7 +153,7 @@ export default function App() {
 
   const issues: Issue[] = validation?.issues ?? run?.issues ?? [];
   return <div className="app-shell">
-    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><button onClick={reopen}>重新打开</button><button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
+    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开</button><button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
     <main>
       <nav className="palette"><h2>处理组件</h2>{components.map((component) => <button key={component.type} onClick={() => addNode(component)}><b>{component.name}</b><span>{component.category}</span></button>)}<p className="muted">新增组件复用 dataflow.project/v1 工程格式。</p></nav>
       <section className="canvas-wrap">

@@ -80,7 +80,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux := buildMux(store)
+	mux := buildMux(store, staticDir())
 	address := getenv("DATAFLOW_ADDR", ":8080")
 	log.Printf("dataflow server listening on %s", address)
 	if err := http.ListenAndServe(address, mux); err != nil {
@@ -88,7 +88,7 @@ func main() {
 	}
 }
 
-func buildMux(store *store) *http.ServeMux {
+func buildMux(store *store, staticDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -179,7 +179,34 @@ func buildMux(store *store) *http.ServeMux {
 		}
 		writeJSON(w, http.StatusOK, result)
 	})
+	if staticDir != "" {
+		mux.Handle("GET /", spaHandler(staticDir))
+	}
 	return mux
+}
+
+func staticDir() string {
+	if dir := os.Getenv("DATAFLOW_STATIC"); dir != "" {
+		return dir
+	}
+	for _, candidate := range []string{"frontend/dist", "../frontend/dist", "dist"} {
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func spaHandler(dir string) http.Handler {
+	files := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		clean := filepath.Clean("/" + r.URL.Path)
+		if info, err := os.Stat(filepath.Join(dir, clean)); err == nil && !info.IsDir() {
+			files.ServeHTTP(w, r)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(dir, "index.html"))
+	})
 }
 
 func getenv(key string, fallback string) string {

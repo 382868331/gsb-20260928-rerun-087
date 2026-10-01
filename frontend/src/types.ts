@@ -61,6 +61,7 @@ export type NodeRunResult = {
   error?: string;
   reason?: string;
   reusedFrom?: string;
+  cause?: "reused" | "rerun_full" | "rerun_params" | "rerun_input" | "rerun_forced" | "rerun_first";
 };
 export type RunResult = {
   ok: boolean;

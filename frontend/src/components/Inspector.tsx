@@ -14,6 +14,7 @@ export function Inspector({ project, node, component, staleIds, onPatchNode, onP
   if (!node || !component) {
     return <aside className="inspector"><h2>检查页面状态</h2><p>选择一个步骤，参数和数据依赖会分别显示。</p></aside>;
   }
+  const params = component.params ?? [];
   const incoming = project.edges.filter((edge) => edge.target === node.id);
   const outgoing = project.edges.filter((edge) => edge.source === node.id);
   const nameById = new Map(project.nodes.map((item) => [item.id, item.name]));
@@ -26,7 +27,7 @@ export function Inspector({ project, node, component, staleIds, onPatchNode, onP
 
       <h3>参数（不是数据依赖）</h3>
       <label>步骤名称<input value={node.name} onChange={(event) => onPatchNode(node.id, { name: event.target.value })} /></label>
-      {component.params.map((field) => (
+      {params.map((field) => (
         <label key={field.id}>
           {field.name}{field.required ? " *" : ""}
           {field.type === "text" ? (

@@ -19,16 +19,18 @@ export const statusText: Record<string, string> = {
 export function StepNode({ data }: NodeProps) {
   const step = data as unknown as StepNodeData;
   const result = step.result;
+  const inputs = step.component?.inputs ?? [];
+  const outputs = step.component?.outputs ?? [];
   const className = ["step-node", step.selected ? "selected" : "", step.stale ? "stale" : "", result?.status ?? ""].filter(Boolean).join(" ");
   return (
     <div className={className}>
-      {step.component?.inputs.map((port) => <Handle key={port.id} id={port.id} type="target" position={Position.Left} />)}
+      {inputs.map((port) => <Handle key={port.id} id={port.id} type="target" position={Position.Left} />)}
       <div className="step-category">{step.component?.category ?? "步骤"}</div>
       <strong>{step.node.name}</strong>
       <small>{step.component?.name ?? step.node.type}</small>
       <div className="step-state">{step.stale ? "结果失效" : result ? statusText[result.status] : "未运行"}</div>
       {result?.error && <em>{result.error}</em>}
-      {step.component?.outputs.map((port) => <Handle key={port.id} id={port.id} type="source" position={Position.Right} />)}
+      {outputs.map((port) => <Handle key={port.id} id={port.id} type="source" position={Position.Right} />)}
     </div>
   );
 }

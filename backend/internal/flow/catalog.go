@@ -5,6 +5,7 @@ func Components() []Component {
 		{
 			Type: "file_input", Name: "文件输入", Category: "输入",
 			Description: "读取一次文件内容，并把它解析成数据表。",
+			Inputs:      []Port{},
 			Outputs:     []Port{{ID: "rows", Name: "数据表"}},
 			Params: []Field{
 				{ID: "fileName", Name: "文件名", Type: "string", Required: true},

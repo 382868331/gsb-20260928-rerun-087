@@ -45,6 +45,12 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	for _, edge := range project.Edges {
 		incoming[edge.Target] = append(incoming[edge.Target], edge)
 	}
+	// baselineVersions 记录本轮开始前已发布产物的版本，
+	// 用于在执行对照中区分“参数变化”与“上游输入变化”。
+	baselineVersions := make(map[string]string)
+	for nodeID, artifact := range artifacts {
+		baselineVersions[nodeID] = artifact.Version
+	}
 
 	ok := true
 	for _, nodeID := range validation.ExecutionOrder {
@@ -53,10 +59,10 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			artifact, exists := artifacts[nodeID]
 			if !exists {
 				ok = false
-				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物", Reason: "不在本轮重算范围内，也找不到可复用的旧产物"}
+				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物", Reason: "不在本轮重算范围内，也找不到可复用的旧产物", Cause: CauseRerunForced}
 				continue
 			}
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID, Reason: fmt.Sprintf("参数与上游产物版本未变，复用 %s 的产物（版本 %s）", artifact.RunID, artifact.Version)}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID, Cause: CauseReused, Reason: fmt.Sprintf("参数与上游产物版本未变，沿用 %s 的产物（版本 %s）", artifact.RunID, artifact.Version)}
 			continue
 		}
 		upstreamRows := make([]Row, 0)
@@ -69,7 +75,13 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 					upstream = NodeResult{Status: "reused", Artifact: &artifact}
 				}
 			}
-			if upstream.Artifact == nil || upstream.Status == "failed" || upstream.Status == "blocked" || upstream.Status == "skipped" {
+			// 关键判定：只有本轮成功或沿用的产物（允许 0 行空表）才能喂给下游；
+			// 上游失败 / 被阻断 / 本轮无结果时，即使磁盘上有旧产物也不能使用。
+			if upstream.Status != "succeeded" && upstream.Status != "reused" {
+				blockedBy = edge.Source
+				break
+			}
+			if upstream.Artifact == nil {
 				blockedBy = edge.Source
 				break
 			}
@@ -82,23 +94,16 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			delete(artifacts, nodeID)
 			continue
 		}
-		reason := "整流程运行，本轮全部重算"
-		if len(startNodeIDs) > 0 {
-			if started[nodeID] {
-				reason = "从本步骤开始的局部重跑"
-			} else {
-				reason = "上游发生变化，连带重算"
-			}
-		}
+		cause, reason := rerunReason(node, started[nodeID], startNodeIDs, incoming[nodeID], upstreamVersions, baselineVersions, artifacts)
 		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, outputRoot)
 		if err != nil {
 			ok = false
-			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Reason: "执行失败，已阻断下游并清除旧产物"}
+			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Reason: "执行失败，已阻断下游并清除旧产物", Cause: cause}
 			delete(artifacts, nodeID)
 			continue
 		}
 		artifacts[nodeID] = artifact
-		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason}
+		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
 	}
 
 	affectedList := make([]string, 0, len(affected))
@@ -107,6 +112,45 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	}
 	sort.Strings(affectedList)
 	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results}
+}
+
+// rerunReason 给出执行对照：本轮重算是整流程重算、起点参数变化，
+// 还是上游输入（产物版本）变化引发的连带重算。
+func rerunReason(node Node, isStart bool, startNodeIDs []string, incomingEdges []Edge, upstreamVersions map[string]string, baselineVersions map[string]string, stored map[string]Artifact) (string, string) {
+	if len(startNodeIDs) == 0 {
+		return CauseRerunFull, "整流程运行，本轮全部重算"
+	}
+	inputChanged := false
+	changedUpstreams := make([]string, 0)
+	for _, edge := range incomingEdges {
+		source := edge.Source
+		current, currentOK := upstreamVersions[source]
+		previous, previousOK := baselineVersions[source]
+		if current != previous || currentOK != previousOK {
+			inputChanged = true
+			changedUpstreams = append(changedUpstreams, source)
+		}
+	}
+	if isStart {
+		previous, existed := stored[node.ID]
+		paramsChanged := !existed || previous.Version != nodeVersion(node, upstreamVersions)
+		switch {
+		case !existed:
+			return CauseRerunFirst, "局部重跑起点：此前没有已发布产物，首次执行"
+		case inputChanged && paramsChanged:
+			return CauseRerunParams, "局部重跑起点：参数与上游输入均有变化，重新执行"
+		case inputChanged:
+			return CauseRerunInput, fmt.Sprintf("局部重跑起点：上游输入 %v 发生变化，重新执行", changedUpstreams)
+		case paramsChanged:
+			return CauseRerunParams, "局部重跑起点：本步骤参数发生变化，重新执行"
+		default:
+			return CauseRerunForced, "用户从本步骤手动触发重跑"
+		}
+	}
+	if inputChanged {
+		return CauseRerunInput, fmt.Sprintf("上游输入 %v 发生变化，连带重新执行", changedUpstreams)
+	}
+	return CauseRerunForced, "位于局部重跑范围内，连带重新执行"
 }
 
 func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, runID string, outputRoot string) (Artifact, error) {
@@ -160,6 +204,9 @@ func parseRows(format string, content string) ([]Row, error) {
 		var rows []Row
 		if err := json.Unmarshal([]byte(content), &rows); err != nil {
 			return nil, err
+		}
+		if rows == nil {
+			rows = []Row{}
 		}
 		return rows, nil
 	case "csv":

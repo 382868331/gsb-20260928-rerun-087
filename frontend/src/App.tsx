@@ -10,6 +10,13 @@ import type { ComponentDef, Issue, Project, RunResult, Validation } from "./type
 
 const nodeTypes = { step: StepNode };
 
+// 后端对没有端口的组件会返回 []（旧数据里也可能出现 null/undefined），
+// 统一归一化为数组，避免空端口列表被当成普通列表 map 时整页崩溃。
+function withEmptyPorts(component: ComponentDef | undefined): ComponentDef | undefined {
+  if (!component) return component;
+  return { ...component, inputs: component.inputs ?? [], outputs: component.outputs ?? [], params: component.params ?? [] };
+}
+
 export default function App() {
   const [components, setComponents] = useState<ComponentDef[]>([]);
   const [project, setProject] = useState<Project>(emptyProject);
@@ -18,14 +25,19 @@ export default function App() {
   const [run, setRun] = useState<RunResult>();
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const staleIds = useMemo(() => downstreamIds(project, [...dirtyIds]), [project, dirtyIds]);
-  const [message, setMessage] = useState("先保存，再执行；循环会在启动前拦截。");
+  const [savedSnapshot, setSavedSnapshot] = useState<{ project: Project; run?: RunResult }>();
+  const [message, setMessage] = useState("先保存，再执行；空工程与空端口节点也能直接进入编辑。");
+  const isPublishedDirty = useMemo(() => {
+    if (!savedSnapshot) return false;
+    return JSON.stringify({ nodes: project.nodes, edges: project.edges }) !== JSON.stringify({ nodes: savedSnapshot.project.nodes, edges: savedSnapshot.project.edges });
+  }, [project, savedSnapshot]);
   const flowNodes = useMemo(() => project.nodes.map((node) => ({
     id: node.id,
     type: "step",
     position: node.position,
     data: {
       node,
-      component: components.find((item) => item.type === node.type),
+      component: withEmptyPorts(components.find((item) => item.type === node.type)),
       result: run?.results[node.id],
       stale: staleIds.has(node.id),
       selected: selectedId === node.id
@@ -93,7 +105,18 @@ export default function App() {
     setRun(undefined);
     setValidation(undefined);
     setDirtyIds(new Set());
+    setSavedSnapshot(undefined);
+    setSelectedId(undefined);
     setMessage("已新建空工程：从左侧添加组件并连线，保存后即可执行。");
+  }
+
+  function withdrawUnpublished() {
+    if (!savedSnapshot) return;
+    setProject(structuredClone(savedSnapshot.project));
+    setRun(savedSnapshot.run ? structuredClone(savedSnapshot.run) : undefined);
+    setDirtyIds(new Set());
+    setValidation(undefined);
+    setMessage("已撤回未发布的修订，重新打开 revision " + savedSnapshot.project.revision + " 的已保存版本。");
   }
 
   async function save() {
@@ -107,7 +130,9 @@ export default function App() {
     setValidation(response.validation);
     if (response.project) {
       setProject(response.project);
-      setMessage("已保存为 revision " + response.project.revision + "，工程可关闭后重新打开执行。");
+      setSavedSnapshot({ project: structuredClone(response.project), run });
+      setDirtyIds(new Set());
+      setMessage("已保存为 revision " + response.project.revision + "，未发布的修订可撤回。");
     } else {
       setMessage("校验未通过：未生成可执行版本，启动被禁止。");
     }
@@ -136,6 +161,7 @@ export default function App() {
     }
     setRun(result);
     setDirtyIds(new Set());
+    setSavedSnapshot({ project: structuredClone(saveResponse.project), run: result });
     setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
   }
 
@@ -147,13 +173,17 @@ export default function App() {
       Object.values(loaded.artifacts ?? {}).forEach((artifact) => { results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId }; });
       setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
       setDirtyIds(new Set());
+      setSavedSnapshot({ project: structuredClone(loaded.project), run: { ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results } });
+      setValidation(undefined);
+      const firstNode = loaded.project.nodes[0];
+      setSelectedId(firstNode?.id);
       setMessage("已重新打开保存的工程和版本化产物。");
     } catch { setMessage("还没有可打开的已保存工程。"); }
   }
 
   const issues: Issue[] = validation?.issues ?? run?.issues ?? [];
   return <div className="app-shell">
-    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开</button><button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
+    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开已保存版本</button>{isPublishedDirty && <button onClick={withdrawUnpublished}>撤回未发布修订</button>}<button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
     <main>
       <nav className="palette"><h2>处理组件</h2>{components.map((component) => <button key={component.type} onClick={() => addNode(component)}><b>{component.name}</b><span>{component.category}</span></button>)}<p className="muted">新增组件复用 dataflow.project/v1 工程格式。</p></nav>
       <section className="canvas-wrap">

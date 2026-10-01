@@ -94,7 +94,17 @@ type NodeResult struct {
 	Error      string    `json:"error,omitempty"`
 	Reason     string    `json:"reason,omitempty"`
 	ReusedFrom string    `json:"reusedFrom,omitempty"`
+	Cause      string    `json:"cause,omitempty"`
 }
+
+const (
+	CauseReused      = "reused"
+	CauseRerunFull   = "rerun_full"
+	CauseRerunParams = "rerun_params"
+	CauseRerunInput  = "rerun_input"
+	CauseRerunForced = "rerun_forced"
+	CauseRerunFirst  = "rerun_first"
+)
 
 type RunResult struct {
 	OK              bool                  `json:"ok"`

@@ -48,6 +48,8 @@ export type Validation = {
 export type Artifact = {
   nodeId: string;
   version: string;
+  paramsVersion?: string;
+  inputVersions?: Record<string, string>;
   runId: string;
   path?: string;
   content?: string;
@@ -61,6 +63,8 @@ export type NodeRunResult = {
   error?: string;
   reason?: string;
   reusedFrom?: string;
+  changeBasis?: "full" | "start" | "params" | "inputs" | "params_and_inputs" | "downstream" | "unchanged";
+  prevVersion?: string;
 };
 export type RunResult = {
   ok: boolean;

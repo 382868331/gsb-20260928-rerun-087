@@ -56,13 +56,15 @@ type Field struct {
 }
 
 type Artifact struct {
-	NodeID  string `json:"nodeId"`
-	Version string `json:"version"`
-	RunID   string `json:"runId"`
-	Path    string `json:"path,omitempty"`
-	Content string `json:"content,omitempty"`
-	Rows    []Row  `json:"rows"`
-	Summary string `json:"summary"`
+	NodeID        string            `json:"nodeId"`
+	Version       string            `json:"version"`
+	ParamsVersion string            `json:"paramsVersion"`
+	InputVersions map[string]string `json:"inputVersions,omitempty"`
+	RunID         string            `json:"runId"`
+	Path          string            `json:"path,omitempty"`
+	Content       string            `json:"content,omitempty"`
+	Rows          []Row             `json:"rows"`
+	Summary       string            `json:"summary"`
 }
 
 type Row map[string]any
@@ -88,12 +90,14 @@ type ValidationResult struct {
 }
 
 type NodeResult struct {
-	NodeID     string    `json:"nodeId"`
-	Status     string    `json:"status"`
-	Artifact   *Artifact `json:"artifact,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
-	ReusedFrom string    `json:"reusedFrom,omitempty"`
+	NodeID      string    `json:"nodeId"`
+	Status      string    `json:"status"`
+	Artifact    *Artifact `json:"artifact,omitempty"`
+	Error       string    `json:"error,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	ReusedFrom  string    `json:"reusedFrom,omitempty"`
+	ChangeBasis string    `json:"changeBasis,omitempty"`
+	PrevVersion string    `json:"prevVersion,omitempty"`
 }
 
 type RunResult struct {

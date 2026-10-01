@@ -1,7 +1,15 @@
 import type { Artifact, ComponentDef, Project, RunResult, SavedProjectResponse, Validation } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...init });
+  let response: Response;
+  try {
+    response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...init });
+  } catch (error) {
+    throw new Error("network", { cause: error });
+  }
+  if (!response.ok && response.status !== 422) {
+    throw new Error("http " + response.status);
+  }
   return response.json() as Promise<T>;
 }
 

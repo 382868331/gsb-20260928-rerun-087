@@ -6,14 +6,33 @@ import { blankProject, createNode, downstreamIds, emptyProject, toReactEdge } fr
 import { DataPanel } from "./components/DataPanel";
 import { Inspector } from "./components/Inspector";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { ComponentDef, Issue, Project, RunResult, Validation } from "./types";
+import type { Artifact, ComponentDef, Issue, Project, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
+
+function artifactsFromResult(result: RunResult | undefined, previous?: RunResult): Record<string, Artifact> {
+  const artifacts: Record<string, Artifact> = {};
+  // Start from the previous saved artifacts so a run that only covers part of
+  // the graph still keeps the reused branch artifacts on disk for reopen.
+  Object.values(previous?.results ?? {}).forEach((entry) => {
+    if (entry.artifact && (entry.status === "reused" || entry.status === "succeeded")) artifacts[entry.artifact.nodeId] = entry.artifact;
+  });
+  Object.values(result?.results ?? {}).forEach((entry) => {
+    if (entry.artifact && entry.status === "succeeded") artifacts[entry.artifact.nodeId] = entry.artifact;
+    if ((entry.status === "failed" || entry.status === "blocked") && entry.nodeId) delete artifacts[entry.nodeId];
+  });
+  return artifacts;
+}
+
+function artifactsFromRun(result: RunResult | undefined): Record<string, Artifact> {
+  return artifactsFromResult(undefined, result);
+}
 
 export default function App() {
   const [components, setComponents] = useState<ComponentDef[]>([]);
   const [project, setProject] = useState<Project>(emptyProject);
   const [selectedId, setSelectedId] = useState<string | undefined>("filter-1");
+  const [savedSnapshot, setSavedSnapshot] = useState<{ project: Project; artifacts: Record<string, Artifact> }>();
   const [validation, setValidation] = useState<Validation>();
   const [run, setRun] = useState<RunResult>();
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
@@ -35,10 +54,31 @@ export default function App() {
   const [edges, setEdges, onEdgesChange] = useEdgesState(project.edges.map(toReactEdge));
   useEffect(() => { setNodes(flowNodes); }, [flowNodes, setNodes]);
   useEffect(() => { setEdges(project.edges.map(toReactEdge)); }, [project.edges, setEdges]);
-  useEffect(() => { api.components().then(setComponents).catch(() => setMessage("无法连接后端：组件目录加载失败，请确认服务已启动。")); }, []);
+  useEffect(() => {
+    api.components()
+      .then((items) => setComponents(Array.isArray(items) ? items : []))
+      .catch(() => setMessage("无法连接后端：组件目录加载失败，当前画布仍可编辑。"));
+  }, []);
 
   const selectedNode = project.nodes.find((node) => node.id === selectedId);
   const selectedComponent = components.find((component) => component.type === selectedNode?.type);
+
+  const hasUnpublishedRevision = useMemo(() => {
+    if (!savedSnapshot) return false;
+    return JSON.stringify({ ...project, revision: 0 }) !== JSON.stringify({ ...savedSnapshot.project, revision: 0 });
+  }, [project, savedSnapshot]);
+
+  function applySaved(projectValue: Project, artifactsValue: Record<string, Artifact> = {}, sourceMessage?: string) {
+    setSavedSnapshot({ project: structuredClone(projectValue), artifacts: structuredClone(artifactsValue) });
+    setProject(projectValue);
+    const results: RunResult["results"] = {};
+    Object.values(artifactsValue ?? {}).forEach((artifact) => {
+      results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId, changeBasis: "unchanged" };
+    });
+    setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
+    setDirtyIds(new Set());
+    if (sourceMessage !== undefined) setMessage(sourceMessage);
+  }
 
   function markChanged(ids: string[]) {
     setRun((current) => {
@@ -93,6 +133,7 @@ export default function App() {
     setRun(undefined);
     setValidation(undefined);
     setDirtyIds(new Set());
+    setSelectedId(undefined);
     setMessage("已新建空工程：从左侧添加组件并连线，保存后即可执行。");
   }
 
@@ -106,12 +147,11 @@ export default function App() {
     }
     setValidation(response.validation);
     if (response.project) {
-      setProject(response.project);
-      setMessage("已保存为 revision " + response.project.revision + "，工程可关闭后重新打开执行。");
+      applySaved(response.project, artifactsFromRun(run), "已保存为 revision " + response.project.revision + "，未发布的后续修改可随时撤回。");
     } else {
       setMessage("校验未通过：未生成可执行版本，启动被禁止。");
     }
-  }
+}
 
   async function execute(startNodeIds: string[]) {
     let saveResponse: { project?: Project; validation: Validation };
@@ -126,34 +166,42 @@ export default function App() {
       setMessage("流程校验失败，运行器没有启动。");
       return;
     }
-    setProject(saveResponse.project);
     let result: RunResult;
     try {
       result = await api.run(saveResponse.project.id, startNodeIds);
     } catch {
       setMessage("运行请求失败：后端不可用，本轮没有产生新结果。");
+      applySaved(saveResponse.project, artifactsFromRun(run), "保存成功但运行接口暂时失败：画布与已有产物已保留，稍后可重试执行。");
       return;
     }
+    const artifacts = artifactsFromResult(result, run);
+    setSavedSnapshot({ project: saveResponse.project, artifacts });
+    setProject(saveResponse.project);
     setRun(result);
     setDirtyIds(new Set());
-    setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
+    setMessage(result.ok ? "运行成功。" : "运行完成但存在失败分支：下游已阻断，旧成功数据不会冒充本轮结果。");
   }
 
   async function reopen() {
     try {
       const loaded = await api.loadProject(project.id);
-      setProject(loaded.project);
-      const results: RunResult["results"] = {};
-      Object.values(loaded.artifacts ?? {}).forEach((artifact) => { results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId }; });
-      setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
-      setDirtyIds(new Set());
-      setMessage("已重新打开保存的工程和版本化产物。");
+      applySaved(loaded.project, loaded.artifacts ?? {}, "已重新打开保存的 revision " + loaded.project.revision + " 和版本化产物。");
+      setSelectedId(undefined);
     } catch { setMessage("还没有可打开的已保存工程。"); }
+  }
+
+  function discardRevision() {
+    if (!savedSnapshot) {
+      setMessage("还没有已保存版本可回退。");
+      return;
+    }
+    applySaved(savedSnapshot.project, savedSnapshot.artifacts, "已撤回未发布的修订，回到保存的 revision " + savedSnapshot.project.revision + "。");
+    setValidation(undefined);
   }
 
   const issues: Issue[] = validation?.issues ?? run?.issues ?? [];
   return <div className="app-shell">
-    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开</button><button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
+    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}{hasUnpublishedRevision ? " · 有未发布修订" : ""}</span><button onClick={newBlank}>新建空工程</button><button onClick={discardRevision} disabled={!hasUnpublishedRevision}>撤回未发布修订</button><button onClick={reopen}>重新打开已保存版本</button><button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
     <main>
       <nav className="palette"><h2>处理组件</h2>{components.map((component) => <button key={component.type} onClick={() => addNode(component)}><b>{component.name}</b><span>{component.category}</span></button>)}<p className="muted">新增组件复用 dataflow.project/v1 工程格式。</p></nav>
       <section className="canvas-wrap">

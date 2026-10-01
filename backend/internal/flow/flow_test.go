@@ -94,22 +94,110 @@ func TestRunReportsReuseReasons(t *testing.T) {
 	if !first.OK {
 		t.Fatal("first run should succeed")
 	}
-	stored := map[string]Artifact{}
-	for nodeID, result := range first.Results {
-		stored[nodeID] = *result.Artifact
-	}
+	stored := firstRunArtifacts(t, project)
 	second := Run(project, "run-2", []string{"b"}, stored, t.TempDir())
 	if !second.OK {
 		t.Fatal("second run should succeed")
 	}
-	if got := second.Results["a"].Reason; !strings.Contains(got, "复用") {
+	if got := second.Results["a"].Reason; !strings.Contains(got, "沿用") {
 		t.Fatalf("unaffected node should explain reuse, got %q", got)
 	}
-	if got := second.Results["b"].Reason; !strings.Contains(got, "局部重跑") {
+	if got := second.Results["b"].Reason; !strings.Contains(got, "重跑入口") {
 		t.Fatalf("start node should explain local rerun, got %q", got)
 	}
-	if got := second.Results["m"].Reason; !strings.Contains(got, "连带重算") {
-		t.Fatalf("downstream should explain recomputation, got %q", got)
+	if got := second.Results["m"].ChangeBasis; got != "downstream" {
+		t.Fatalf("merge rerun basis = %q, want downstream", got)
+	}
+	if got := second.Results["m"].Reason; !strings.Contains(got, "连带重新执行") {
+		t.Fatalf("downstream should explain cascade, got %q", got)
+	}
+}
+
+func firstRunArtifacts(t *testing.T, project Project) map[string]Artifact {
+	t.Helper()
+	first := Run(project, "run-1", nil, nil, t.TempDir())
+	if !first.OK {
+		t.Fatalf("first run failed: %#v", first.Issues)
+	}
+	stored := map[string]Artifact{}
+	for nodeID, result := range first.Results {
+		stored[nodeID] = *result.Artifact
+	}
+	return stored
+}
+
+func TestRevisionDistinguishesParamAndInputChanges(t *testing.T) {
+	project := testProject()
+
+	// Changing only the start node params: start node = start basis, merge = inputs.
+	byInput := testProject()
+	byInput.Nodes[1].Params["content"] = "id,city\n3,S\n4,S"
+	resultInput := Run(byInput, "run-2", []string{"b"}, firstRunArtifacts(t, project), t.TempDir())
+	if !resultInput.OK {
+		t.Fatalf("input-driven rerun failed: %#v", resultInput.Results)
+	}
+	if got := resultInput.Results["m"].ChangeBasis; got != "inputs" {
+		t.Fatalf("merge basis = %q, want inputs", got)
+	}
+
+	// Re-running from m with only m params changed, upstream inputs reused unchanged: m = params.
+	byParams := testProject()
+	byParams.Nodes[2].Params["operation"] = "uppercase"
+	byParams.Nodes[2].Params["field"] = "city"
+	resultParams := Run(byParams, "run-3", []string{"m"}, firstRunArtifacts(t, project), t.TempDir())
+	if !resultParams.OK {
+		t.Fatalf("param-driven rerun failed: %#v", resultParams.Results)
+	}
+	if got := resultParams.Results["m"].ChangeBasis; got != "params" {
+		t.Fatalf("m basis = %q, want params", got)
+	}
+	if got := resultParams.Results["m"].Reason; !strings.Contains(got, "参数已变化") {
+		t.Fatalf("m reason = %q, want param change explanation", got)
+	}
+	if got := resultParams.Results["o"].ChangeBasis; got != "inputs" {
+		t.Fatalf("o basis = %q, want inputs", got)
+	}
+}
+
+// Shared upstream that yields zero rows together with one failed branch must
+// never let the shared downstream serve its old successful artifact.
+func TestEmptyOutputAndFailedBranchBlockSharedDownstream(t *testing.T) {
+	project := testProject()
+	stored := firstRunArtifacts(t, project)
+	oldMerge := stored["m"]
+	if len(oldMerge.Rows) != 3 {
+		t.Fatalf("baseline merge rows = %d, want 3", len(oldMerge.Rows))
+	}
+
+	// b filters its only row away (empty output); a also breaks in the same rerun.
+	project.Nodes[0].Params["format"] = "json"
+	project.Nodes[0].Params["content"] = "not-json"
+	project.Nodes[1].Params["content"] = "id,city\n9,Hangzhou"
+	project.Nodes = append(project.Nodes, Node{
+		ID: "f", Type: "transform", Name: "过滤空",
+		Params: map[string]any{"operation": "filter_equals", "field": "city", "value": "Shanghai"},
+	})
+	project.Edges = []Edge{
+		{ID: "am", Source: "a", Target: "m", SourcePort: "rows", TargetPort: "rows"},
+		{ID: "bf", Source: "b", Target: "f", SourcePort: "rows", TargetPort: "rows"},
+		{ID: "fm", Source: "f", Target: "m", SourcePort: "rows", TargetPort: "rows"},
+		{ID: "mo", Source: "m", Target: "o", SourcePort: "rows", TargetPort: "rows"},
+	}
+	second := Run(project, "run-2", nil, stored, t.TempDir())
+	if second.OK {
+		t.Fatal("rerun with failing branch must not be OK")
+	}
+	if second.Results["a"].Status != "failed" {
+		t.Fatalf("a status = %s, want failed", second.Results["a"].Status)
+	}
+	if second.Results["f"].Status != "succeeded" || len(second.Results["f"].Artifact.Rows) != 0 {
+		t.Fatalf("filter should succeed with zero rows: %#v", second.Results["f"])
+	}
+	if second.Results["m"].Status != "blocked" || second.Results["m"].Artifact != nil {
+		t.Fatalf("shared merge must be blocked without old artifact: %#v", second.Results["m"])
+	}
+	if second.Results["o"].Status != "blocked" || second.Results["o"].Artifact != nil {
+		t.Fatalf("shared output must be blocked without old artifact: %#v", second.Results["o"])
 	}
 }
 

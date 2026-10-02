@@ -54,10 +54,25 @@ export type Artifact = {
   rows: Record<string, unknown>[];
   summary: string;
 };
+export type Publication = {
+  nodeId: string;
+  recipient: string;
+  version: string;
+  runId: string;
+  path?: string;
+  rows: Record<string, unknown>[];
+  summary: string;
+  publishedAt: string;
+};
+export type Visibility = "published" | "already" | "computed" | "previous" | "none";
+export type PublishPolicy = "all" | "partial";
 export type NodeRunResult = {
   nodeId: string;
   status: "succeeded" | "failed" | "blocked" | "reused";
   artifact?: Artifact;
+  visibility?: Visibility;
+  recipient?: string;
+  published?: Publication;
   error?: string;
   reason?: string;
   reusedFrom?: string;
@@ -67,8 +82,12 @@ export type RunResult = {
   ok: boolean;
   runId: string;
   projectVersion: string;
+  publishPolicy?: PublishPolicy;
   affectedNodeIds: string[];
   results: Record<string, NodeRunResult>;
+  publications?: Record<string, Publication>;
   issues?: Issue[];
 };
-export type SavedProjectResponse = { project: Project; validation: Validation };
+export type SavedProjectResponse = { project: Project; validation: Validation; publications?: Record<string, Publication> };
+export type LoadedProjectResponse = { project: Project; artifacts: Record<string, Artifact>; publications?: Record<string, Publication> };
+export type RunRequest = { startNodeIds: string[]; publishPolicy: PublishPolicy };

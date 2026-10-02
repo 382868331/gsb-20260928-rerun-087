@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Background, Controls, ReactFlow, addEdge, useEdgesState, useNodesState, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { api } from "./api";
-import { blankProject, createNode, downstreamIds, emptyProject, toReactEdge } from "./project";
+import { blankProject, createNode, downstreamIds, emptyProject, normalizeProject, toReactEdge } from "./project";
 import { DataPanel } from "./components/DataPanel";
 import { Inspector } from "./components/Inspector";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { ComponentDef, Issue, Project, RunResult, Validation } from "./types";
+import type { ComponentDef, Issue, Project, Publication, PublishPolicy, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
 
@@ -19,10 +19,14 @@ function withEmptyPorts(component: ComponentDef | undefined): ComponentDef | und
 
 export default function App() {
   const [components, setComponents] = useState<ComponentDef[]>([]);
-  const [project, setProject] = useState<Project>(emptyProject);
+  const [project, setProjectState] = useState<Project>(() => normalizeProject(emptyProject()));
   const [selectedId, setSelectedId] = useState<string | undefined>("filter-1");
   const [validation, setValidation] = useState<Validation>();
   const [run, setRun] = useState<RunResult>();
+  const [publications, setPublications] = useState<Record<string, Publication>>({});
+  const [publishPolicy, setPublishPolicy] = useState<PublishPolicy>("all");
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "failed">("idle");
+  const [lastFailure, setLastFailure] = useState<string>("");
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const staleIds = useMemo(() => downstreamIds(project, [...dirtyIds]), [project, dirtyIds]);
   const [savedSnapshot, setSavedSnapshot] = useState<{ project: Project; run?: RunResult }>();
@@ -31,6 +35,9 @@ export default function App() {
     if (!savedSnapshot) return false;
     return JSON.stringify({ nodes: project.nodes, edges: project.edges }) !== JSON.stringify({ nodes: savedSnapshot.project.nodes, edges: savedSnapshot.project.edges });
   }, [project, savedSnapshot]);
+  const setProject = (next: Project | ((current: Project) => Project)) => {
+    setProjectState((current) => normalizeProject(typeof next === "function" ? (next as (current: Project) => Project)(current) : next));
+  };
   const flowNodes = useMemo(() => project.nodes.map((node) => ({
     id: node.id,
     type: "step",
@@ -101,89 +108,157 @@ export default function App() {
   };
 
   function newBlank() {
-    setProject(blankProject());
+    setProject(normalizeProject(blankProject()));
     setRun(undefined);
     setValidation(undefined);
     setDirtyIds(new Set());
     setSavedSnapshot(undefined);
+    setPublications({});
+    setSaveState("idle");
     setSelectedId(undefined);
     setMessage("已新建空工程：从左侧添加组件并连线，保存后即可执行。");
   }
 
   function withdrawUnpublished() {
     if (!savedSnapshot) return;
-    setProject(structuredClone(savedSnapshot.project));
+    // 撤回只回退未发布修订：已经发出的发布凭证不会被删除。
+    const snapshotProject = normalizeProject(structuredClone(savedSnapshot.project));
+    setProject(snapshotProject);
     setRun(savedSnapshot.run ? structuredClone(savedSnapshot.run) : undefined);
+    setPublications((current) => structuredClone(current));
     setDirtyIds(new Set());
     setValidation(undefined);
     setMessage("已撤回未发布的修订，重新打开 revision " + savedSnapshot.project.revision + " 的已保存版本。");
   }
 
-  async function save() {
-    let response: { project?: Project; validation: Validation };
+  type SaveResponse = { project?: Project; validation: Validation; publications?: Record<string, Publication> };
+
+  async function saveProjectOnce(canvasBefore: Project): Promise<SaveResponse> {
+    setSaveState("saving");
+    setLastFailure("");
     try {
-      response = await api.saveProject(project) as { project?: Project; validation: Validation };
-    } catch {
-      setMessage("无法连接后端：保存失败，页面状态未变更。");
+      const response = await api.saveProject(canvasBefore) as SaveResponse | Validation;
+      setSaveState("idle");
+      return response as SaveResponse;
+    } catch (error) {
+      // 真实失败：不触碰画布与本次输入，进入可恢复状态，可立即重试。
+      setProject(normalizeProject(canvasBefore));
+      setSaveState("failed");
+      const detail = error instanceof Error ? error.message : "未知错误";
+      setLastFailure(detail);
+      throw error;
+    }
+  }
+
+  function applyPublications(next?: Record<string, Publication>) {
+    if (next) setPublications(next);
+  }
+
+  async function save() {
+    // 保存前画布与输入原样保留（函数式读取最新状态也不修改它）。
+    const canvasBefore = normalizeProject(project);
+    let response: SaveResponse;
+    try {
+      response = await saveProjectOnce(canvasBefore);
+    } catch (error) {
+      setMessage("保存失败：画布和本次输入均已保留，可直接重试或继续编辑。" + (error instanceof Error ? "（" + error.message + "）" : ""));
       return;
     }
     setValidation(response.validation);
     if (response.project) {
-      setProject(response.project);
-      setSavedSnapshot({ project: structuredClone(response.project), run });
+      const saved = normalizeProject(response.project);
+      setProject(saved);
+      applyPublications(response.publications);
+      setSavedSnapshot({ project: structuredClone(saved), run });
       setDirtyIds(new Set());
-      setMessage("已保存为 revision " + response.project.revision + "，未发布的修订可撤回。");
+      setMessage("已保存为 revision " + saved.revision + "，可以立即继续编辑；未发布的修订可撤回。");
     } else {
-      setMessage("校验未通过：未生成可执行版本，启动被禁止。");
+      setMessage("校验未通过：未生成可执行版本，画布与输入保留，可修改后重试。");
     }
   }
 
   async function execute(startNodeIds: string[]) {
-    let saveResponse: { project?: Project; validation: Validation };
+    const canvasBefore = normalizeProject(project);
+    let saveResponse: SaveResponse;
     try {
-      saveResponse = await api.saveProject(project) as { project?: Project; validation: Validation };
-    } catch {
-      setMessage("无法连接后端：运行器没有启动，页面保留当前状态。");
+      saveResponse = await saveProjectOnce(canvasBefore);
+    } catch (error) {
+      setMessage("运行前保存失败：运行器没有启动，画布保留，可重试运行。" + (error instanceof Error ? "（" + error.message + "）" : ""));
       return;
     }
     setValidation(saveResponse.validation);
     if (!saveResponse.project) {
-      setMessage("流程校验失败，运行器没有启动。");
+      setMessage("流程校验失败，运行器没有启动；画布保留可继续修改。");
       return;
     }
-    setProject(saveResponse.project);
+    const saved = normalizeProject(saveResponse.project);
+    setProject(saved);
+    applyPublications(saveResponse.publications);
     let result: RunResult;
     try {
-      result = await api.run(saveResponse.project.id, startNodeIds);
-    } catch {
-      setMessage("运行请求失败：后端不可用，本轮没有产生新结果。");
+      result = await api.run(saved.id, startNodeIds, publishPolicy);
+    } catch (error) {
+      setSaveState("failed");
+      setLastFailure(error instanceof Error ? error.message : "运行请求失败");
+      setMessage("运行请求真实失败：本轮没有产生结果，画布保留，可直接重试。" + (error instanceof Error ? "（" + error.message + "）" : ""));
       return;
     }
     setRun(result);
+    if (result.publications) setPublications(result.publications);
     setDirtyIds(new Set());
-    setSavedSnapshot({ project: structuredClone(saveResponse.project), run: result });
-    setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
+    setSavedSnapshot({ project: structuredClone(saved), run: result });
+    setSaveState("idle");
+    const publishedCount = Object.values(result.results).filter((item) => item.visibility === "published").length;
+    const computedCount = Object.values(result.results).filter((item) => item.visibility === "computed").length;
+    if (result.ok) {
+      setMessage("运行完成：" + publishedCount + " 个结果已对接收方可见。");
+    } else {
+      setMessage("运行出现失败：" + publishedCount + " 个已发布、" + computedCount + " 个仅已计算；已发布的旧版本对接收方仍可见。");
+    }
   }
 
   async function reopen() {
     try {
       const loaded = await api.loadProject(project.id);
-      setProject(loaded.project);
+      setProject(normalizeProject(loaded.project));
       const results: RunResult["results"] = {};
       Object.values(loaded.artifacts ?? {}).forEach((artifact) => { results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId }; });
-      setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
+      const loadedPublications = loaded.publications ?? {};
+      Object.values(loadedPublications).forEach((publication) => {
+        if (results[publication.nodeId]) {
+          results[publication.nodeId] = { ...results[publication.nodeId], visibility: "already", recipient: publication.recipient, published: publication };
+        }
+      });
+      setPublications(loadedPublications);
+      setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results, publications: loadedPublications });
       setDirtyIds(new Set());
-      setSavedSnapshot({ project: structuredClone(loaded.project), run: { ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results } });
+      setSavedSnapshot({ project: structuredClone(normalizeProject(loaded.project)), run: { ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results, publications: loadedPublications } });
       setValidation(undefined);
-      const firstNode = loaded.project.nodes[0];
+      const firstNode = normalizeProject(loaded.project).nodes[0];
       setSelectedId(firstNode?.id);
-      setMessage("已重新打开保存的工程和版本化产物。");
-    } catch { setMessage("还没有可打开的已保存工程。"); }
+      setMessage("已重新打开保存的工程：可核对每个接收方当前可见的已发布版本。");
+    } catch (error) {
+      setSaveState("failed");
+      setLastFailure(error instanceof Error ? error.message : "重新打开失败");
+      setMessage("重新打开失败：当前画布未受影响。" + (error instanceof Error ? "（" + error.message + "）" : ""));
+    }
   }
 
   const issues: Issue[] = validation?.issues ?? run?.issues ?? [];
+  const recipientOutputs = project.nodes.filter((node) => node.type === "file_output");
   return <div className="app-shell">
-    <header><h1>数据处理流程设计器</h1><div>{message}</div><div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开已保存版本</button>{isPublishedDirty && <button onClick={withdrawUnpublished}>撤回未发布修订</button>}<button onClick={save}>保存版本</button><button className="primary" onClick={() => execute([])}>整流程运行</button></div></header>
+    <header><h1>数据处理流程设计器</h1><div>{message}</div>
+      {saveState === "failed" && <div className="banner danger save-banner"><b>保存/运行请求失败（可恢复）</b><span>画布与本次输入均已保留，未替换为错误结果。原因：{lastFailure}</span><div><button onClick={save}>重试保存</button><button className="primary" onClick={() => execute([])}>重试整流程运行</button><button onClick={() => setSaveState("idle")}>继续编辑</button></div></div>}
+      <div className="actions"><span className="revision">revision {project.revision}</span><button onClick={newBlank}>新建空工程</button><button onClick={reopen}>重新打开已保存版本</button>{isPublishedDirty && <button onClick={withdrawUnpublished}>撤回未发布修订</button>}<button onClick={save} disabled={saveState === "saving"}>{saveState === "saving" ? "保存中…" : "保存版本"}</button>
+        <label className="policy">多接收方发布
+          <select value={publishPolicy} onChange={(event) => setPublishPolicy(event.target.value as PublishPolicy)}>
+            <option value="all">全部结果共同确认</option>
+            <option value="partial">允许部分结果先行</option>
+          </select>
+        </label>
+        <button className="primary" onClick={() => execute([])} disabled={saveState === "saving"}>整流程运行（{recipientOutputs.length} 个接收方）</button>
+      </div>
+    </header>
     <main>
       <nav className="palette"><h2>处理组件</h2>{components.map((component) => <button key={component.type} onClick={() => addNode(component)}><b>{component.name}</b><span>{component.category}</span></button>)}<p className="muted">新增组件复用 dataflow.project/v1 工程格式。</p></nav>
       <section className="canvas-wrap">
@@ -194,6 +269,6 @@ export default function App() {
       </section>
       <Inspector project={project} node={selectedNode} component={selectedComponent} staleIds={staleIds} onPatchNode={patchNode} onPatchParam={patchParam} onRunFrom={() => selectedId && execute([selectedId])} />
     </main>
-    <DataPanel project={project} selectedId={selectedId} run={run} />
+    <DataPanel project={project} selectedId={selectedId} run={run} onSelectNode={setSelectedId} />
   </div>;
 }

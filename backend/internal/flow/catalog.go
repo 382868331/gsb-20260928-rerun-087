@@ -26,11 +26,12 @@ func Components() []Component {
 		},
 		{
 			Type: "file_output", Name: "文件输出", Category: "输出",
-			Description: "把本轮实际收到的数据写到目标文件。",
+			Description: "把本轮实际收到的数据发布给指定接收方；可要求全部结果共同确认，或允许部分结果先行。",
 			Inputs:      []Port{{ID: "rows", Name: "数据表", Multi: true}},
 			Params: []Field{
 				{ID: "path", Name: "输出路径", Type: "string", Required: true},
 				{ID: "format", Name: "格式", Type: "select", Required: true, Options: []string{"csv", "json"}},
+				{ID: "recipient", Name: "接收方", Type: "string", Required: false, Description: "该结果对谁可见；留空时使用步骤名称。每个输出步骤对应一个接收方。"},
 			},
 		},
 	}

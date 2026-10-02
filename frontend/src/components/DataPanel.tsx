@@ -1,7 +1,7 @@
 import type { Project, RunResult } from "../types";
-import { statusText } from "./StepNode";
+import { statusText, visibilityText } from "./StepNode";
 
-type Props = { project: Project; selectedId?: string; run?: RunResult };
+type Props = { project: Project; selectedId?: string; run?: RunResult; onSelectNode?: (id: string) => void };
 
 const causeText: Record<string, string> = {
   reused: "沿用原结果",
@@ -12,7 +12,7 @@ const causeText: Record<string, string> = {
   rerun_first: "首次执行"
 };
 
-export function DataPanel({ project, selectedId, run }: Props) {
+export function DataPanel({ project, selectedId, run, onSelectNode }: Props) {
   const selected = project.nodes.find((node) => node.id === selectedId);
   const result = selectedId ? run?.results[selectedId] : undefined;
   const rows = result?.artifact?.rows ?? [];
@@ -33,15 +33,26 @@ export function DataPanel({ project, selectedId, run }: Props) {
             </div>}
           </>
         )}
+        {selected.type === "file_output" && <div className="recipient-card">
+          <b>接收方：{String(selected.params.recipient ?? selected.name)}</b>
+          {result?.visibility ? <span className={"visibility-pill " + result.visibility}>{visibilityText[result.visibility] ?? result.visibility}</span> : <span className="visibility-pill none">尚未运行发布</span>}
+          {result?.published && <em>已发布证据：{result.published.runId} · 版本 {result.published.version} · {result.published.publishedAt}{result.published.path ? ` · 文件 ${result.published.path}` : ""}</em>}
+        </div>}
       </>
     )}
     {run && <div className="scope"><b>本轮范围：</b>{run.affectedNodeIds.map((id) => project.nodes.find((node) => node.id === id)?.name ?? id).join(" → ")}</div>}
-    {run && <div className="reuse-report"><b>修订后的执行对照</b>
+    {run && <div className="reuse-report"><b>修订后的执行对照与接收方可见性{publishPolicyText(run.publishPolicy)}</b>
       {project.nodes.map((node) => {
         const stepResult = run.results[node.id];
         if (!stepResult) return null;
-        return <div key={node.id} className={"reuse-row " + stepResult.status}><span>{node.name}</span><b>{statusText[stepResult.status] ?? stepResult.status}{stepResult.cause ? ` · ${causeText[stepResult.cause] ?? stepResult.cause}` : ""}</b><em>{stepResult.reason ?? stepResult.error ?? ""}</em></div>;
+        return <div key={node.id} data-node-id={node.id} className={"reuse-row clickable " + stepResult.status} onClick={() => selectedId !== node.id && onSelectNode?.(node.id)}><span>{node.name}{node.type === "file_output" ? ` → ${String(node.params.recipient ?? node.name)}` : ""}</span><b>{statusText[stepResult.status] ?? stepResult.status}{stepResult.cause ? ` · ${causeText[stepResult.cause] ?? stepResult.cause}` : ""}{stepResult.visibility ? ` · ${visibilityText[stepResult.visibility] ?? stepResult.visibility}` : ""}</b><em>{stepResult.reason ?? stepResult.error ?? ""}</em></div>;
       })}
     </div>}
   </section>;
+}
+
+function publishPolicyText(policy?: string) {
+  if (policy === "all") return "（全部共同确认：有分支失败则一个都不发布）";
+  if (policy === "partial") return "（允许部分结果先行）";
+  return "";
 }

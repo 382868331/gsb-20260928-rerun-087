@@ -11,7 +11,7 @@ func Validate(project Project) ValidationResult {
 	for _, component := range Components() {
 		components[component.Type] = component
 	}
-	var issues []Issue
+	issues := []Issue{}
 	if project.Format != "dataflow.project/v1" {
 		issues = append(issues, Issue{Code: "unsupported_format", Message: "工程格式必须是 dataflow.project/v1"})
 	}
@@ -90,7 +90,7 @@ func Validate(project Project) ValidationResult {
 	if len(cycle) > 0 {
 		issues = append(issues, Issue{Code: "cycle_detected", Message: fmt.Sprintf("启动前检测到循环连接：%v", cycle)})
 	}
-	return ValidationResult{OK: len(issues) == 0, Issues: issues, ExecutionOrder: order}
+	return ValidationResult{OK: len(issues) == 0, Issues: issues, ExecutionOrder: order, AffectedNodeIDs: AffectedNodes(project, nil)}
 }
 
 func AffectedNodes(project Project, changedNodeIDs []string) []string {
@@ -112,6 +112,9 @@ func AffectedNodes(project Project, changedNodeIDs []string) []string {
 	var result []string
 	for nodeID := range downstream {
 		result = append(result, nodeID)
+	}
+	if result == nil {
+		result = []string{}
 	}
 	sort.Strings(result)
 	return result

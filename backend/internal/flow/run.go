@@ -13,30 +13,48 @@ import (
 	"strings"
 )
 
+// Options 控制一次运行的发布策略。
+type Options struct {
+	StartNodeIDs []string
+	Stored       map[string]Artifact
+	// Publications 是运行前已经对接收方可见的发布凭证，按输出步骤 ID 索引，永不因失败而删除。
+	Publications map[string]Publication
+	// Policy 为 all（全部共同确认）或 partial（允许部分先行）。
+	Policy     string
+	OutputRoot string
+	Now        string
+}
+
+// Run 保持旧调用方式：等价于按 partial 策略运行并发布成功结果。
 func Run(project Project, runID string, startNodeIDs []string, stored map[string]Artifact, outputRoot string) RunResult {
+	return RunWithOptions(project, runID, Options{StartNodeIDs: startNodeIDs, Stored: stored, Policy: PublishPartial, OutputRoot: outputRoot, Now: runID})
+}
+
+func RunWithOptions(project Project, runID string, options Options) RunResult {
 	validation := Validate(project)
 	if !validation.OK {
-		return RunResult{OK: false, RunID: runID, Issues: validation.Issues}
+		return RunResult{OK: false, RunID: runID, Issues: validation.Issues, Results: map[string]NodeResult{}, Publications: clonePublications(options.Publications)}
 	}
 	affected := make(map[string]bool)
-	for _, nodeID := range AffectedNodes(project, startNodeIDs) {
+	for _, nodeID := range AffectedNodes(project, options.StartNodeIDs) {
 		affected[nodeID] = true
 	}
-	if len(startNodeIDs) == 0 {
+	if len(options.StartNodeIDs) == 0 {
 		for _, nodeID := range validation.ExecutionOrder {
 			affected[nodeID] = true
 		}
 	}
 	started := make(map[string]bool)
-	for _, nodeID := range startNodeIDs {
+	for _, nodeID := range options.StartNodeIDs {
 		started[nodeID] = true
 	}
 	projectVersion := hashProject(project)
 	results := make(map[string]NodeResult)
 	artifacts := make(map[string]Artifact)
-	for nodeID, artifact := range stored {
+	for nodeID, artifact := range options.Stored {
 		artifacts[nodeID] = artifact
 	}
+	publications := clonePublications(options.Publications)
 	nodes := make(map[string]Node)
 	incoming := make(map[string][]Edge)
 	for _, node := range project.Nodes {
@@ -94,8 +112,8 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			delete(artifacts, nodeID)
 			continue
 		}
-		cause, reason := rerunReason(node, started[nodeID], startNodeIDs, incoming[nodeID], upstreamVersions, baselineVersions, artifacts)
-		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, outputRoot)
+		cause, reason := rerunReason(node, started[nodeID], options.StartNodeIDs, incoming[nodeID], upstreamVersions, baselineVersions, artifacts)
+		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID)
 		if err != nil {
 			ok = false
 			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Reason: "执行失败，已阻断下游并清除旧产物", Cause: cause}
@@ -111,7 +129,150 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		affectedList = append(affectedList, nodeID)
 	}
 	sort.Strings(affectedList)
-	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results}
+
+	policy := options.Policy
+	if policy != PublishAll {
+		policy = PublishPartial
+	}
+	publishResults(&results, nodes, validation.ExecutionOrder, artifacts, publications, policy, ok, options.OutputRoot, runID, options.Now)
+	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, PublishPolicy: policy, AffectedNodeIDs: affectedList, Results: results, Publications: publications}
+}
+
+func clonePublications(source map[string]Publication) map[string]Publication {
+	result := make(map[string]Publication)
+	for nodeID, publication := range source {
+		result[nodeID] = publication
+	}
+	return result
+}
+
+// publishResults 是计算之后的“对接收方发布”阶段：
+// all 策略下任一输出分支失败则本轮一个结果都不发布；
+// partial 策略下成功的输出各自独立发布；重跑不会对版本未变的输出重复发布。
+func publishResults(results *map[string]NodeResult, nodes map[string]Node, order []string, artifacts map[string]Artifact, publications map[string]Publication, policy string, runOK bool, outputRoot string, runID string, now string) {
+	outputIDs := make([]string, 0)
+	for _, nodeID := range order {
+		if nodes[nodeID].Type == "file_output" {
+			outputIDs = append(outputIDs, nodeID)
+		}
+	}
+	allConfirmed := runOK
+	for _, nodeID := range outputIDs {
+		status := (*results)[nodeID].Status
+		if status != "succeeded" && status != "reused" {
+			allConfirmed = false
+		}
+	}
+	if policy == PublishAll && len(outputIDs) > 0 && !allConfirmed {
+		for _, nodeID := range outputIDs {
+			entry := (*results)[nodeID]
+			if entry.Status == "succeeded" || entry.Status == "reused" {
+				entry.Recipient = recipientOf(nodes[nodeID])
+				if previous, exists := publications[nodeID]; exists {
+					copyPrevious := previous
+					entry.Published = &copyPrevious
+				}
+				entry.Visibility = VisibilityComputed
+				if entry.Published != nil {
+					entry.Reason = "本轮结果仅已计算：共同确认策略下其他接收方分支失败，尚未发布；接收方仍可见版本 " + entry.Published.Version
+				} else {
+					entry.Reason = "本轮结果仅已计算：共同确认策略下其他接收方分支失败，尚未对接收方发布"
+				}
+				(*results)[nodeID] = entry
+			} else {
+				markOutputVisibility(results, nodes[nodeID], publicationPointer(publications, nodeID))
+			}
+		}
+		return
+	}
+	for _, nodeID := range outputIDs {
+		markOutputVisibility(results, nodes[nodeID], publicationPointer(publications, nodeID))
+		entry := (*results)[nodeID]
+		if entry.Status != "succeeded" && entry.Status != "reused" {
+			continue
+		}
+		artifact := artifacts[nodeID]
+		if previous, exists := publications[nodeID]; exists && previous.Version == artifact.Version {
+			// 已发布过完全相同版本（产物版本包含上游版本）：重跑不重复发布。
+			entry.Visibility = VisibilityAlready
+			copyPrevious := previous
+			entry.Published = &copyPrevious
+			entry.Reason = fmt.Sprintf("结果版本 %s 已在 %s 对接收方「%s」发布，重跑不重复发布", previous.Version, previous.RunID, previous.Recipient)
+			(*results)[nodeID] = entry
+			continue
+		}
+		recipient := recipientOf(nodes[nodeID])
+		path, err := writeOutputArtifact(nodes[nodeID], artifact, outputRoot)
+		if err != nil {
+			entry.Status = "failed"
+			entry.Error = "对接收方发布失败：" + err.Error()
+			if entry.Visibility == "" {
+				entry.Visibility = VisibilityNone
+			}
+			(*results)[nodeID] = entry
+			continue
+		}
+		artifact.Path = path
+		artifacts[nodeID] = artifact
+		artifactPointer := artifact
+		entry.Artifact = &artifactPointer
+		if now == "" {
+			now = runID
+		}
+		publication := Publication{NodeID: nodeID, Recipient: recipient, Version: artifact.Version, RunID: runID, Path: path, Rows: artifact.Rows, Summary: artifact.Summary, PublishedAt: now}
+		publications[nodeID] = publication
+		entry.Visibility = VisibilityPublished
+		entry.Recipient = recipient
+		entry.Published = &publication
+		if policy == PublishAll {
+			entry.Reason = fmt.Sprintf("全部接收方共同确认成功，已向「%s」发布版本 %s（%d 行）", recipient, artifact.Version, len(artifact.Rows))
+		} else {
+			entry.Reason = fmt.Sprintf("已先行向接收方「%s」发布版本 %s（%d 行），其他分支不受影响", recipient, artifact.Version, len(artifact.Rows))
+		}
+		(*results)[nodeID] = entry
+	}
+}
+
+func publicationPointer(publications map[string]Publication, nodeID string) *Publication {
+	if previous, exists := publications[nodeID]; exists {
+		copyPrevious := previous
+		return &copyPrevious
+	}
+	return nil
+}
+
+// markOutputVisibility 为输出步骤补充接收方与历史凭证信息：
+// 本轮失败或阻断时，接收方仍能看到上一已发布版本（previous），从未发布过则为 none。
+func markOutputVisibility(results *map[string]NodeResult, node Node, previous *Publication) {
+	entry := (*results)[node.ID]
+	entry.Recipient = recipientOf(node)
+	if previous != nil {
+		copyPrevious := *previous
+		entry.Published = &copyPrevious
+	}
+	if entry.Status == "failed" || entry.Status == "blocked" {
+		if previous != nil {
+			entry.Visibility = VisibilityPrevious
+			entry.Reason = fmt.Sprintf("本轮%s，未替换已发布内容；接收方「%s」仍可见 %s 发布的版本 %s", failureWord(entry.Status), previous.Recipient, previous.RunID, previous.Version)
+		} else {
+			entry.Visibility = VisibilityNone
+		}
+		(*results)[node.ID] = entry
+	}
+}
+
+func failureWord(status string) string {
+	if status == "blocked" {
+		return "被阻断"
+	}
+	return "失败"
+}
+
+func recipientOf(node Node) string {
+	if recipient := strings.TrimSpace(paramString(node.Params["recipient"])); recipient != "" {
+		return recipient
+	}
+	return node.Name
 }
 
 // rerunReason 给出执行对照：本轮重算是整流程重算、起点参数变化，
@@ -153,11 +314,10 @@ func rerunReason(node Node, isStart bool, startNodeIDs []string, incomingEdges [
 	return CauseRerunForced, "位于局部重跑范围内，连带重新执行"
 }
 
-func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, runID string, outputRoot string) (Artifact, error) {
+func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, runID string) (Artifact, error) {
 	version := nodeVersion(node, upstreamVersions)
 	var rows []Row
 	var summary string
-	var outputPath string
 	var content string
 	switch node.Type {
 	case "file_input":
@@ -181,21 +341,26 @@ func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, 
 			return Artifact{}, err
 		}
 		content = encoded
-		outputPath, err := safeOutputPath(outputRoot, paramString(node.Params["path"]))
-		if err != nil {
-			return Artifact{}, err
-		}
-		if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
-			return Artifact{}, err
-		}
-		if err := os.WriteFile(outputPath, []byte(content), 0o644); err != nil {
-			return Artifact{}, err
-		}
-		summary = fmt.Sprintf("写出 %d 行到 %s", len(rows), paramString(node.Params["path"]))
+		summary = fmt.Sprintf("为接收方「%s」准备 %d 行（目标 %s），尚未发布", recipientOf(node), len(rows), paramString(node.Params["path"]))
 	default:
 		return Artifact{}, fmt.Errorf("未知组件：%s", node.Type)
 	}
-	return Artifact{NodeID: node.ID, Version: version, RunID: runID, Path: outputPath, Content: content, Rows: rows, Summary: summary}, nil
+	return Artifact{NodeID: node.ID, Version: version, RunID: runID, Content: content, Rows: rows, Summary: summary}, nil
+}
+
+// writeOutputArtifact 仅在发布阶段把已确认结果写到接收方文件。
+func writeOutputArtifact(node Node, artifact Artifact, outputRoot string) (string, error) {
+	outputPath, err := safeOutputPath(outputRoot, paramString(node.Params["path"]))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(outputPath, []byte(artifact.Content), 0o644); err != nil {
+		return "", err
+	}
+	return outputPath, nil
 }
 
 func parseRows(format string, content string) ([]Row, error) {

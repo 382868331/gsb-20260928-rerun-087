@@ -8,10 +8,10 @@ export const emptyProject = (): Project => ({
   nodes: [
     { id: "input-1", type: "file_input", name: "读取订单 CSV", position: { x: 50, y: 130 }, params: { fileName: "orders.csv", format: "csv", content: "id,city,amount\n1001,Shanghai,88\n1002,Beijing,42\n1003,Shanghai,120" } },
     { id: "filter-1", type: "transform", name: "只保留上海订单", position: { x: 330, y: 120 }, params: { operation: "filter_equals", field: "city", value: "Shanghai" } },
-    { id: "output-1", type: "file_output", name: "写出上海订单", position: { x: 630, y: 130 }, params: { path: "shanghai-orders.json", format: "json" } },
+    { id: "output-1", type: "file_output", name: "写出上海订单", position: { x: 630, y: 130 }, params: { path: "shanghai-orders.json", format: "json", recipient: "上海运营组" } },
     { id: "input-2", type: "file_input", name: "读取补充订单", position: { x: 50, y: 360 }, params: { fileName: "more-orders.csv", format: "csv", content: "id,city,amount\n2001,Shanghai,55" } },
     { id: "merge-1", type: "transform", name: "分支汇合", position: { x: 330, y: 330 }, params: { operation: "passthrough" } },
-    { id: "output-2", type: "file_output", name: "写出汇合结果", position: { x: 630, y: 350 }, params: { path: "merged-orders.csv", format: "csv" } }
+    { id: "output-2", type: "file_output", name: "写出汇合结果", position: { x: 630, y: 350 }, params: { path: "merged-orders.csv", format: "csv", recipient: "数据仓库接收方" } }
   ],
   edges: [
     { id: "e-input-filter", source: "input-1", target: "filter-1", sourcePort: "rows", targetPort: "rows" },
@@ -30,6 +30,15 @@ export const blankProject = (): Project => ({
   nodes: [],
   edges: []
 });
+
+// 空工程、旧数据或异常响应可能带来 null 集合：统一兜底为数组，避免画布崩溃。
+export function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    nodes: Array.isArray(project.nodes) ? project.nodes : [],
+    edges: Array.isArray(project.edges) ? project.edges : [],
+  };
+}
 
 export function defaultParams(component: ComponentDef): Record<string, unknown> {
   const params: Record<string, unknown> = {};

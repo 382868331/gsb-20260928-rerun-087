@@ -14,20 +14,22 @@ import (
 )
 
 type store struct {
-	mu        sync.Mutex
-	file      string
-	outputDir string
-	projects  map[string]flow.Project
-	artifacts map[string]map[string]flow.Artifact
+	mu         sync.Mutex
+	file       string
+	outputDir  string
+	projects   map[string]flow.Project
+	artifacts  map[string]map[string]flow.Artifact
+	deliveries map[string]map[string]flow.DeliveryState
 }
 
 type savedEnvelope struct {
-	Projects  map[string]flow.Project             `json:"projects"`
-	Artifacts map[string]map[string]flow.Artifact `json:"artifacts"`
+	Projects   map[string]flow.Project                  `json:"projects"`
+	Artifacts  map[string]map[string]flow.Artifact      `json:"artifacts"`
+	Deliveries map[string]map[string]flow.DeliveryState `json:"deliveries"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -45,6 +47,14 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.Artifacts != nil {
 		s.artifacts = envelope.Artifacts
 	}
+	if envelope.Deliveries != nil {
+		s.deliveries = envelope.Deliveries
+	}
+	// 磁盘上的旧数据可能把空节点/连接集合存成 null，重新打开时统一归一化为 []，
+	// 避免前端拿到未定义的节点集合后整页崩溃。
+	for id, project := range s.projects {
+		s.projects[id] = normalizeProject(project)
+	}
 	return s, nil
 }
 
@@ -52,7 +62,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -61,6 +71,21 @@ func (s *store) saveLocked() error {
 		return err
 	}
 	return os.Rename(temporary, s.file)
+}
+
+func normalizeProject(project flow.Project) flow.Project {
+	if project.Nodes == nil {
+		project.Nodes = []flow.Node{}
+	}
+	if project.Edges == nil {
+		project.Edges = []flow.Edge{}
+	}
+	for index, node := range project.Nodes {
+		if node.Params == nil {
+			project.Nodes[index].Params = map[string]any{}
+		}
+	}
+	return project
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
@@ -109,6 +134,9 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			writeError(w, http.StatusBadRequest, "工程 JSON 无效")
 			return
 		}
+		// 空工程 / 空连接集合在 JSON 里可能是 null，落库前统一为 []，
+		// 保证保存响应与重新打开都返回可立即继续编辑的节点集合。
+		project = normalizeProject(project)
 		store.mu.Lock()
 		defer store.mu.Unlock()
 		validation := flow.Validate(project)
@@ -116,6 +144,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			writeJSON(w, http.StatusUnprocessableEntity, validation)
 			return
 		}
+		project = normalizeProject(project)
 		if existing, ok := store.projects[project.ID]; ok {
 			project.Revision = existing.Revision + 1
 		} else {
@@ -137,7 +166,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			writeError(w, http.StatusNotFound, "工程不存在")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id]})
+		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "deliveries": store.deliveries[id]})
 	})
 	mux.HandleFunc("POST /api/projects/{id}/run", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
@@ -161,7 +190,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			return
 		}
 		runID := newRunID()
-		result := flow.Run(project, runID, body.StartNodeIDs, store.artifacts[id], filepath.Join(store.outputDir, id, runID))
+		result := flow.Run(project, runID, body.StartNodeIDs, store.artifacts[id], store.deliveries[id], filepath.Join(store.outputDir, id, runID))
 		if store.artifacts[id] == nil {
 			store.artifacts[id] = map[string]flow.Artifact{}
 		}
@@ -173,11 +202,46 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 				delete(store.artifacts[id], nodeID)
 			}
 		}
+		// 投递状态（含已发布证据）随运行推进并持久化；失败/阻断不会清除已发出的结果。
+		if result.Deliveries != nil {
+			store.deliveries[id] = result.Deliveries
+		}
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("POST /api/projects/{id}/confirm", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var body struct {
+			NodeIDs []string `json:"nodeIds"`
+			All     bool     `json:"all"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "确认请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		if store.deliveries[id] == nil {
+			store.deliveries[id] = map[string]flow.DeliveryState{}
+		}
+		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID())
+		if err != nil {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		store.deliveries[id] = updated
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated})
 	})
 	if staticDir != "" {
 		mux.Handle("GET /", spaHandler(staticDir))

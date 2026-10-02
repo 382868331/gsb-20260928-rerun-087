@@ -84,6 +84,9 @@ func Validate(project Project) ValidationResult {
 		if component.Type == "file_output" && len(incoming[node.ID]) == 0 {
 			issues = append(issues, Issue{Code: "missing_data_dependency", NodeID: node.ID, Message: "文件输出必须连接数据表"})
 		}
+		if component.Type == "publish" && len(incoming[node.ID]) == 0 {
+			issues = append(issues, Issue{Code: "missing_data_dependency", NodeID: node.ID, Message: "发布到接收方必须连接数据表"})
+		}
 	}
 
 	order, cycle := topologicalOrder(project.Nodes, outgoing, incoming)

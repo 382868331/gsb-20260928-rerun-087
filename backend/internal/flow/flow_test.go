@@ -23,7 +23,7 @@ func testProject() Project {
 }
 
 func TestBranchMergeExecution(t *testing.T) {
-	result := Run(testProject(), "run-1", nil, nil, t.TempDir())
+	result := Run(testProject(), "run-1", nil, nil, nil, t.TempDir())
 	if !result.OK {
 		t.Fatalf("expected success: %#v", result.Issues)
 	}
@@ -39,7 +39,7 @@ func TestCycleRejectedBeforeRun(t *testing.T) {
 	if validation.OK {
 		t.Fatal("expected cycle validation failure")
 	}
-	result := Run(project, "run-cycle", nil, nil, t.TempDir())
+	result := Run(project, "run-cycle", nil, nil, nil, t.TempDir())
 	if result.OK || len(result.Issues) == 0 {
 		t.Fatal("cycle must prevent run start")
 	}
@@ -48,7 +48,7 @@ func TestCycleRejectedBeforeRun(t *testing.T) {
 func TestFailureBlocksDownstreamAndRemovesOldArtifact(t *testing.T) {
 	project := testProject()
 	stored := make(map[string]Artifact)
-	first := Run(project, "run-1", nil, nil, t.TempDir())
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	for nodeID, result := range first.Results {
 		if result.Artifact != nil {
 			stored[nodeID] = *result.Artifact
@@ -56,7 +56,7 @@ func TestFailureBlocksDownstreamAndRemovesOldArtifact(t *testing.T) {
 	}
 	project.Nodes[0].Params["content"] = "not-json"
 	project.Nodes[0].Params["format"] = "json"
-	second := Run(project, "run-2", []string{"a"}, stored, t.TempDir())
+	second := Run(project, "run-2", []string{"a"}, stored, nil, t.TempDir())
 	if second.OK {
 		t.Fatal("invalid input should fail")
 	}
@@ -70,13 +70,13 @@ func TestFailureBlocksDownstreamAndRemovesOldArtifact(t *testing.T) {
 
 func TestLocalRunReusesUnaffectedBranch(t *testing.T) {
 	project := testProject()
-	first := Run(project, "run-1", nil, nil, t.TempDir())
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	stored := map[string]Artifact{}
 	for nodeID, result := range first.Results {
 		stored[nodeID] = *result.Artifact
 	}
 	project.Nodes[1].Params["content"] = "id,city\n3,S\n4,S"
-	second := Run(project, "run-2", []string{"b"}, stored, t.TempDir())
+	second := Run(project, "run-2", []string{"b"}, stored, nil, t.TempDir())
 	if !second.OK {
 		t.Fatalf("local run failed")
 	}
@@ -90,7 +90,7 @@ func TestLocalRunReusesUnaffectedBranch(t *testing.T) {
 
 func TestRunReportsReuseReasons(t *testing.T) {
 	project := testProject()
-	first := Run(project, "run-1", nil, nil, t.TempDir())
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	if !first.OK {
 		t.Fatal("first run should succeed")
 	}
@@ -98,7 +98,7 @@ func TestRunReportsReuseReasons(t *testing.T) {
 	for nodeID, result := range first.Results {
 		stored[nodeID] = *result.Artifact
 	}
-	second := Run(project, "run-2", []string{"b"}, stored, t.TempDir())
+	second := Run(project, "run-2", []string{"b"}, stored, nil, t.TempDir())
 	if !second.OK {
 		t.Fatal("second run should succeed")
 	}
@@ -118,7 +118,7 @@ func TestEmptyArtifactRowsAreNonNull(t *testing.T) {
 	project.Nodes[2].Params["operation"] = "filter_equals"
 	project.Nodes[2].Params["field"] = "city"
 	project.Nodes[2].Params["value"] = "NONE"
-	result := Run(project, "run-empty", nil, nil, t.TempDir())
+	result := Run(project, "run-empty", nil, nil, nil, t.TempDir())
 	if !result.OK {
 		t.Fatalf("empty filter result should still succeed: %#v", result.Issues)
 	}
@@ -149,7 +149,7 @@ func TestSharedUpstreamEmptyAndLocalFailureCannotReuseOldSuccess(t *testing.T) {
 			{ID: "d2-o", Source: "down2", Target: "out", SourcePort: "rows", TargetPort: "rows"},
 		},
 	}
-	first := Run(project, "run-1", nil, nil, t.TempDir())
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	if !first.OK {
 		t.Fatalf("baseline run failed: %#v", first.Issues)
 	}
@@ -162,7 +162,7 @@ func TestSharedUpstreamEmptyAndLocalFailureCannotReuseOldSuccess(t *testing.T) {
 	project.Nodes[0].Params["content"] = "id,city\n1,ZZZ"
 	project.Nodes[1].Params["format"] = "json"
 	project.Nodes[1].Params["content"] = "not-json"
-	second := Run(project, "run-2", []string{"shared", "side"}, stored, t.TempDir())
+	second := Run(project, "run-2", []string{"shared", "side"}, stored, nil, t.TempDir())
 	if second.OK {
 		t.Fatal("second run should fail due to side input parse error")
 	}
@@ -183,13 +183,13 @@ func TestSharedUpstreamEmptyAndLocalFailureCannotReuseOldSuccess(t *testing.T) {
 
 func TestRerunCausesDistinguishParamsAndInputs(t *testing.T) {
 	project := testProject()
-	first := Run(project, "run-1", nil, nil, t.TempDir())
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	stored := map[string]Artifact{}
 	for nodeID, nodeResult := range first.Results {
 		stored[nodeID] = *nodeResult.Artifact
 	}
 	project.Nodes[1].Params["content"] = "id,city\n3,S\n4,S"
-	second := Run(project, "run-2", []string{"b"}, stored, t.TempDir())
+	second := Run(project, "run-2", []string{"b"}, stored, nil, t.TempDir())
 	if !second.OK {
 		t.Fatal("second run failed")
 	}

@@ -33,5 +33,13 @@ func Components() []Component {
 				{ID: "format", Name: "格式", Type: "select", Required: true, Options: []string{"csv", "json"}},
 			},
 		},
+		{
+			Type: "publish", Name: "发布到接收方", Category: "发布",
+			Description: "把本轮结果投递给一个接收方；先仅计算，确认后才对接收方可见。",
+			Inputs:      []Port{{ID: "rows", Name: "数据表", Multi: true}},
+			Params: []Field{
+				{ID: "receiver", Name: "接收方", Type: "string", Required: true, Description: "结果投递对象，例如 财务 / 运营 / 审计。"},
+			},
+		},
 	}
 }

@@ -41,6 +41,23 @@ main { min-height: 0; display: grid; grid-template-columns: 190px 1fr 340px; }
 .danger { background: #fee2e2; color: #991b1b; }
 .ports { display: grid; gap: 6px; font-size: 12px; }
 .data-panel { background: white; border-top: 1px solid #dde5ef; padding: 12px 16px; overflow: auto; }
+.bottom-panels { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; border-top: 1px solid #dde5ef; }
+.bottom-panels .data-panel { border-top: 0; }
+.publish-panel { background: white; border-left: 1px solid #dde5ef; padding: 12px 16px; overflow: auto; }
+.publish-panel h2 { font-size: 16px; margin: 0; }
+.publish-actions { display: flex; gap: 8px; }
+.receiver-card { border: 1px solid #dde5ef; border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+.receiver-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.delivery-state { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; color: #475569; }
+.delivery-state.pending { background: #fef3c7; color: #92400e; }
+.delivery-state.visible { background: #dcfce7; color: #166534; }
+.delivery-line { margin: 6px 0; font-size: 13px; }
+.visible-line { color: #166534; }
+.pending-line { color: #92400e; }
+.receiver-card button { margin-top: 4px; font-size: 12px; padding: 5px 10px; }
+.evidence { margin-top: 8px; font-size: 12px; color: #475569; }
+.evidence-row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px dashed #eef2f7; }
+.evidence-row em { color: #64748b; font-style: normal; }
 .panel-title { display: flex; justify-content: space-between; align-items: center; }
 .table-wrap { max-height: 105px; overflow: auto; border: 1px solid #e2e8f0; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; }

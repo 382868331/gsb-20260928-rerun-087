@@ -97,6 +97,41 @@ type NodeResult struct {
 	Cause      string    `json:"cause,omitempty"`
 }
 
+// Delivery 是一次面向接收方的结果投递记录：版本、来源运行与行数。
+type Delivery struct {
+	NodeID   string `json:"nodeId"`
+	Receiver string `json:"receiver"`
+	Version  string `json:"version"`
+	RunID    string `json:"runId"`
+	Rows     int    `json:"rows"`
+	Empty    bool   `json:"empty"`
+	Summary  string `json:"summary"`
+}
+
+// DeliveryEvent 是追加式证据日志：已发出的结果即使撤回修订也保留。
+type DeliveryEvent struct {
+	Kind    string `json:"kind"`
+	Version string `json:"version"`
+	RunID   string `json:"runId"`
+	Note    string `json:"note"`
+}
+
+const (
+	EventComputed   = "computed"
+	EventSuperseded = "superseded"
+	EventPublished  = "published"
+)
+
+// DeliveryState 记录一个发布节点的当前投递状态：
+// Pending 仅已计算（对接收方不可见），Published 已对接收方可见。
+type DeliveryState struct {
+	NodeID    string          `json:"nodeId"`
+	Receiver  string          `json:"receiver"`
+	Pending   *Delivery       `json:"pending,omitempty"`
+	Published *Delivery       `json:"published,omitempty"`
+	History   []DeliveryEvent `json:"history"`
+}
+
 const (
 	CauseReused      = "reused"
 	CauseRerunFull   = "rerun_full"
@@ -107,10 +142,11 @@ const (
 )
 
 type RunResult struct {
-	OK              bool                  `json:"ok"`
-	RunID           string                `json:"runId"`
-	ProjectVersion  string                `json:"projectVersion"`
-	AffectedNodeIDs []string              `json:"affectedNodeIds"`
-	Results         map[string]NodeResult `json:"results"`
-	Issues          []Issue               `json:"issues,omitempty"`
+	OK              bool                     `json:"ok"`
+	RunID           string                   `json:"runId"`
+	ProjectVersion  string                   `json:"projectVersion"`
+	AffectedNodeIDs []string                 `json:"affectedNodeIds"`
+	Results         map[string]NodeResult    `json:"results"`
+	Deliveries      map[string]DeliveryState `json:"deliveries,omitempty"`
+	Issues          []Issue                  `json:"issues,omitempty"`
 }

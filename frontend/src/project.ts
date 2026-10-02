@@ -12,6 +12,9 @@ export const emptyProject = (): Project => ({
     { id: "input-2", type: "file_input", name: "读取补充订单", position: { x: 50, y: 360 }, params: { fileName: "more-orders.csv", format: "csv", content: "id,city,amount\n2001,Shanghai,55" } },
     { id: "merge-1", type: "transform", name: "分支汇合", position: { x: 330, y: 330 }, params: { operation: "passthrough" } },
     { id: "output-2", type: "file_output", name: "写出汇合结果", position: { x: 630, y: 350 }, params: { path: "merged-orders.csv", format: "csv" } }
+    ,
+    { id: "publish-1", type: "publish", name: "发布上海订单给财务", position: { x: 900, y: 90 }, params: { receiver: "财务" } },
+    { id: "publish-2", type: "publish", name: "发布汇合结果给运营", position: { x: 900, y: 320 }, params: { receiver: "运营" } }
   ],
   edges: [
     { id: "e-input-filter", source: "input-1", target: "filter-1", sourcePort: "rows", targetPort: "rows" },
@@ -19,6 +22,9 @@ export const emptyProject = (): Project => ({
     { id: "e-filter-merge", source: "filter-1", target: "merge-1", sourcePort: "rows", targetPort: "rows" },
     { id: "e-more-merge", source: "input-2", target: "merge-1", sourcePort: "rows", targetPort: "rows" },
     { id: "e-merge-output", source: "merge-1", target: "output-2", sourcePort: "rows", targetPort: "rows" }
+    ,
+    { id: "e-filter-publish", source: "filter-1", target: "publish-1", sourcePort: "rows", targetPort: "rows" },
+    { id: "e-merge-publish", source: "merge-1", target: "publish-2", sourcePort: "rows", targetPort: "rows" }
   ]
 });
 
@@ -30,6 +36,16 @@ export const blankProject = (): Project => ({
   nodes: [],
   edges: []
 });
+
+// 后端或旧存档可能给出 null/缺失的节点与连接集合（空工程最常见），
+// 任何进入页面的工程都先归一化，避免“未定义节点集合”让画布崩溃。
+export function normalizeProject(project: Project): Project {
+  return {
+    ...project,
+    nodes: (project.nodes ?? []).map((node) => ({ ...node, params: node.params ?? {} })),
+    edges: project.edges ?? []
+  };
+}
 
 export function defaultParams(component: ComponentDef): Record<string, unknown> {
   const params: Record<string, unknown> = {};

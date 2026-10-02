@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-func Run(project Project, runID string, startNodeIDs []string, stored map[string]Artifact, outputRoot string) RunResult {
+func Run(project Project, runID string, startNodeIDs []string, stored map[string]Artifact, deliveries map[string]DeliveryState, outputRoot string) RunResult {
 	validation := Validate(project)
 	if !validation.OK {
 		return RunResult{OK: false, RunID: runID, Issues: validation.Issues}
@@ -50,6 +50,11 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	baselineVersions := make(map[string]string)
 	for nodeID, artifact := range artifacts {
 		baselineVersions[nodeID] = artifact.Version
+	}
+	// 投递状态随本轮运行推进：仅已计算（pending）与已对接收方可见（published）分开记录。
+	updatedDeliveries := make(map[string]DeliveryState)
+	for nodeID, state := range deliveries {
+		updatedDeliveries[nodeID] = state
 	}
 
 	ok := true
@@ -103,6 +108,11 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			continue
 		}
 		artifacts[nodeID] = artifact
+		if node.Type == "publish" {
+			var deliveryNote string
+			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID)
+			reason = reason + "；" + deliveryNote
+		}
 		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
 	}
 
@@ -111,7 +121,83 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		affectedList = append(affectedList, nodeID)
 	}
 	sort.Strings(affectedList)
-	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results}
+	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries}
+}
+
+// recordComputedDelivery 把本轮发布节点的计算结果登记为“仅已计算”的待确认投递：
+// - 版本与已发布一致时不重复发布，保留原已发布记录；
+// - 版本与待确认一致时沿用待确认结果；
+// - 共享上游变化导致版本不同时，旧待确认被取代（需重新核对来源），已发布版本保留。
+func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string) (map[string]DeliveryState, string) {
+	state := deliveries[node.ID]
+	state.NodeID = node.ID
+	state.Receiver = paramString(node.Params["receiver"])
+	if state.History == nil {
+		state.History = []DeliveryEvent{}
+	}
+	computed := Delivery{
+		NodeID:   node.ID,
+		Receiver: state.Receiver,
+		Version:  artifact.Version,
+		RunID:    runID,
+		Rows:     len(artifact.Rows),
+		Empty:    len(artifact.Rows) == 0,
+		Summary:  artifact.Summary,
+	}
+	switch {
+	case state.Published != nil && state.Published.Version == computed.Version:
+		deliveries[node.ID] = state
+		return deliveries, "版本与已发布结果一致，不重复发布"
+	case state.Pending != nil && state.Pending.Version == computed.Version:
+		deliveries[node.ID] = state
+		return deliveries, "待确认版本未变，沿用待确认结果"
+	default:
+		if state.Pending != nil {
+			state.History = append(state.History, DeliveryEvent{Kind: EventSuperseded, Version: state.Pending.Version, RunID: runID, Note: "上游来源变化，旧待确认结果被取代，需重新核对"})
+		}
+		state.Pending = &computed
+		state.History = append(state.History, DeliveryEvent{Kind: EventComputed, Version: computed.Version, RunID: runID, Note: "本轮仅已计算，确认前对接收方不可见"})
+		deliveries[node.ID] = state
+		return deliveries, "本轮结果仅已计算，确认后才对接收方可见"
+	}
+}
+
+// ConfirmDeliveries 把待确认投递标记为对接收方可见；all 为 true 时要求全部待确认一起确认，
+// 否则只允许明确指定的节点部分先行。已发布记录与证据日志保留。
+func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string) (map[string]DeliveryState, []string, error) {
+	targets := map[string]bool{}
+	if all {
+		for nodeID, state := range deliveries {
+			if state.Pending != nil {
+				targets[nodeID] = true
+			}
+		}
+		if len(targets) == 0 {
+			return deliveries, nil, fmt.Errorf("没有待确认的发布结果")
+		}
+	} else {
+		for _, nodeID := range nodeIDs {
+			targets[nodeID] = true
+		}
+	}
+	confirmed := make([]string, 0, len(targets))
+	for nodeID := range targets {
+		state, exists := deliveries[nodeID]
+		if !exists || state.Pending == nil {
+			return deliveries, nil, fmt.Errorf("节点 %s 没有待确认的发布结果", nodeID)
+		}
+	}
+	for nodeID := range targets {
+		state := deliveries[nodeID]
+		published := *state.Pending
+		state.Published = &published
+		state.Pending = nil
+		state.History = append(state.History, DeliveryEvent{Kind: EventPublished, Version: published.Version, RunID: runID, Note: "已确认，结果对接收方可见"})
+		deliveries[nodeID] = state
+		confirmed = append(confirmed, nodeID)
+	}
+	sort.Strings(confirmed)
+	return deliveries, confirmed, nil
 }
 
 // rerunReason 给出执行对照：本轮重算是整流程重算、起点参数变化，
@@ -192,6 +278,9 @@ func executeNode(node Node, upstream []Row, upstreamVersions map[string]string, 
 			return Artifact{}, err
 		}
 		summary = fmt.Sprintf("写出 %d 行到 %s", len(rows), paramString(node.Params["path"]))
+	case "publish":
+		rows = upstream
+		summary = fmt.Sprintf("向接收方 %s 准备 %d 行", paramString(node.Params["receiver"]), len(rows))
 	default:
 		return Artifact{}, fmt.Errorf("未知组件：%s", node.Type)
 	}

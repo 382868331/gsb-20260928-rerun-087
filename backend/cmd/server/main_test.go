@@ -112,3 +112,96 @@ func TestStaticSpaFallback(t *testing.T) {
 		t.Fatalf("api must not be shadowed by static handler: %d", response.Code)
 	}
 }
+
+func publishTestProject() flow.Project {
+	return flow.Project{
+		Format: "dataflow.project/v1", ID: "pub-http", Name: "发布测试",
+		Nodes: []flow.Node{
+			{ID: "in", Type: "file_input", Name: "输入", Params: map[string]any{"fileName": "a.csv", "format": "csv", "content": "id,city\n1,S\n2,B"}},
+			{ID: "pub", Type: "publish", Name: "发布", Params: map[string]any{"receiver": "财务"}},
+		},
+		Edges: []flow.Edge{{ID: "ip", Source: "in", Target: "pub", SourcePort: "rows", TargetPort: "rows"}},
+	}
+}
+
+func TestEmptyProjectSaveReturnsEmptyCollections(t *testing.T) {
+	store, err := newStore(filepath.Join(t.TempDir(), "store.json"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := buildMux(store, "")
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewBufferString(`{"format":"dataflow.project/v1","id":"blank","name":"空","revision":0,"nodes":null,"edges":null}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("empty save status = %d", response.Code)
+	}
+	body := response.Body.String()
+	if !strings.Contains(body, `"nodes":[]`) || !strings.Contains(body, `"edges":[]`) {
+		t.Fatalf("empty project must serialize empty collections, got %s", body)
+	}
+	// 重新打开同样必须是 []，前端拿到后可以继续编辑而不是整页崩溃。
+	request = httptest.NewRequest(http.MethodGet, "/api/projects/blank", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if !strings.Contains(response.Body.String(), `"nodes":[]`) {
+		t.Fatalf("reopened project must keep empty node collection, got %s", response.Body.String())
+	}
+}
+
+func TestRunConfirmAndReloadDeliveries(t *testing.T) {
+	directory := t.TempDir()
+	store, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := buildMux(store, "")
+	encoded, _ := json.Marshal(publishTestProject())
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(encoded))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save status = %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/projects/pub-http/run", bytes.NewBufferString(`{"startNodeIds":[]}`))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var run flow.RunResult
+	json.NewDecoder(response.Body).Decode(&run)
+	if !run.OK || run.Deliveries["pub"].Pending == nil {
+		t.Fatalf("run should compute a pending delivery: %#v", run)
+	}
+
+	// 确认途中重新打开：接收方视角应与确认前一致（仍不可见）。
+	request = httptest.NewRequest(http.MethodGet, "/api/projects/pub-http", nil)
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	var reopened struct {
+		Deliveries map[string]flow.DeliveryState `json:"deliveries"`
+	}
+	json.NewDecoder(response.Body).Decode(&reopened)
+	if reopened.Deliveries["pub"].Pending == nil || reopened.Deliveries["pub"].Published != nil {
+		t.Fatalf("确认途中重开应看到仅已计算状态: %#v", reopened.Deliveries["pub"])
+	}
+
+	request = httptest.NewRequest(http.MethodPost, "/api/projects/pub-http/confirm", bytes.NewBufferString(`{"all":true}`))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("confirm status = %d, body %s", response.Code, response.Body.String())
+	}
+
+	// 重启（重新加载磁盘）后，已发布证据必须保留。
+	reloaded, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := reloaded.deliveries["pub-http"]["pub"]
+	if state.Published == nil || state.Published.RunID == "" {
+		t.Fatalf("published delivery must survive reload: %#v", state)
+	}
+	if len(state.History) == 0 {
+		t.Fatal("delivery evidence history must survive reload")
+	}
+}

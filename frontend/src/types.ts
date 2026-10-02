@@ -69,6 +69,24 @@ export type RunResult = {
   projectVersion: string;
   affectedNodeIds: string[];
   results: Record<string, NodeRunResult>;
+  deliveries?: Record<string, DeliveryState>;
   issues?: Issue[];
 };
 export type SavedProjectResponse = { project: Project; validation: Validation };
+export type Delivery = {
+  nodeId: string;
+  receiver: string;
+  version: string;
+  runId: string;
+  rows: number;
+  empty: boolean;
+  summary: string;
+};
+export type DeliveryEvent = { kind: "computed" | "superseded" | "published"; version: string; runId: string; note: string };
+export type DeliveryState = {
+  nodeId: string;
+  receiver: string;
+  pending?: Delivery;
+  published?: Delivery;
+  history: DeliveryEvent[];
+};

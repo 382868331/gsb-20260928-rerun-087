@@ -224,14 +224,15 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		}
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		if _, ok := store.projects[id]; !ok {
+		project, ok := store.projects[id]
+		if !ok {
 			writeError(w, http.StatusNotFound, "请先保存工程")
 			return
 		}
 		if store.deliveries[id] == nil {
 			store.deliveries[id] = map[string]flow.DeliveryState{}
 		}
-		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID())
+		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID(), flow.ProjectVersion(project))
 		if err != nil {
 			writeError(w, http.StatusConflict, err.Error())
 			return

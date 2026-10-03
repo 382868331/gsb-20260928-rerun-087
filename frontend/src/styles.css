@@ -51,9 +51,11 @@ main { min-height: 0; display: grid; grid-template-columns: 190px 1fr 340px; }
 .delivery-state { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; color: #475569; }
 .delivery-state.pending { background: #fef3c7; color: #92400e; }
 .delivery-state.visible { background: #dcfce7; color: #166534; }
+.delivery-state.stale { background: #fee2e2; color: #991b1b; }
 .delivery-line { margin: 6px 0; font-size: 13px; }
 .visible-line { color: #166534; }
 .pending-line { color: #92400e; }
+.stale-line { color: #991b1b; text-decoration: line-through; }
 .receiver-card button { margin-top: 4px; font-size: 12px; padding: 5px 10px; }
 .evidence { margin-top: 8px; font-size: 12px; color: #475569; }
 .evidence-row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px dashed #eef2f7; }

@@ -110,10 +110,24 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		artifacts[nodeID] = artifact
 		if node.Type == "publish" {
 			var deliveryNote string
-			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID)
+			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID, projectVersion)
 			reason = reason + "；" + deliveryNote
 		}
 		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
+	}
+
+	// 本轮失败 / 被阻断的发布节点：其遗留待确认候选所依据的运行已经失效，
+	// 标记为已失效（保留供查阅失败前后差异），确认时必须拒绝。
+	for nodeID, nodeResult := range results {
+		if nodeResult.Status != "failed" && nodeResult.Status != "blocked" {
+			continue
+		}
+		node, exists := nodes[nodeID]
+		if !exists || node.Type != "publish" {
+			continue
+		}
+		updatedDeliveries = invalidatePendingDelivery(updatedDeliveries, nodeID,
+			fmt.Sprintf("本轮运行中该分支%s（%s），待确认结果失去运行依据", statusLabel(nodeResult.Status), nodeResult.Error))
 	}
 
 	affectedList := make([]string, 0, len(affected))
@@ -124,29 +138,63 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries}
 }
 
+func statusLabel(status string) string {
+	if status == "failed" {
+		return "执行失败"
+	}
+	return "被阻断"
+}
+
+// invalidatePendingDelivery 把遗留的待确认候选标记为已失效：候选与已发布记录都保留，
+// 但确认时会被拒绝并说明失去了哪项依据。
+func invalidatePendingDelivery(deliveries map[string]DeliveryState, nodeID string, reason string) map[string]DeliveryState {
+	state, exists := deliveries[nodeID]
+	if !exists || state.Pending == nil || state.Pending.Stale {
+		return deliveries
+	}
+	pending := *state.Pending
+	pending.Stale = true
+	pending.StaleReason = reason
+	state.Pending = &pending
+	state.History = append(state.History, DeliveryEvent{Kind: EventInvalidated, Version: pending.Version, RunID: pending.RunID, Note: reason + "，候选已失效，需重新运行产生新候选"})
+	deliveries[nodeID] = state
+	return deliveries
+}
+
 // recordComputedDelivery 把本轮发布节点的计算结果登记为“仅已计算”的待确认投递：
+// - 旧候选已失效（依据丢失）时，本轮重算产生全新的待确认版本，旧候选仅留证；
 // - 版本与已发布一致时不重复发布，保留原已发布记录；
 // - 版本与待确认一致时沿用待确认结果；
 // - 共享上游变化导致版本不同时，旧待确认被取代（需重新核对来源），已发布版本保留。
-func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string) (map[string]DeliveryState, string) {
+func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string, projectVersion string) (map[string]DeliveryState, string) {
 	state := deliveries[node.ID]
 	state.NodeID = node.ID
 	state.Receiver = paramString(node.Params["receiver"])
 	if state.History == nil {
 		state.History = []DeliveryEvent{}
 	}
+	// 已失效的旧候选不能因输出相同而重新生效：先移除（失效证据已在历史里），
+	// 本轮结果作为全新的待确认版本登记。
+	replacedStale := state.Pending != nil && state.Pending.Stale
+	if replacedStale {
+		state.Pending = nil
+	}
 	computed := Delivery{
-		NodeID:   node.ID,
-		Receiver: state.Receiver,
-		Version:  artifact.Version,
-		RunID:    runID,
-		Rows:     len(artifact.Rows),
-		Empty:    len(artifact.Rows) == 0,
-		Summary:  artifact.Summary,
+		NodeID:         node.ID,
+		Receiver:       state.Receiver,
+		Version:        artifact.Version,
+		RunID:          runID,
+		ProjectVersion: projectVersion,
+		Rows:           len(artifact.Rows),
+		Empty:          len(artifact.Rows) == 0,
+		Summary:        artifact.Summary,
 	}
 	switch {
 	case state.Published != nil && state.Published.Version == computed.Version:
 		deliveries[node.ID] = state
+		if replacedStale {
+			return deliveries, "本轮结果与已发布版本一致，不重复发布；失效旧候选已清除留证"
+		}
 		return deliveries, "版本与已发布结果一致，不重复发布"
 	case state.Pending != nil && state.Pending.Version == computed.Version:
 		deliveries[node.ID] = state
@@ -158,21 +206,30 @@ func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, arti
 		state.Pending = &computed
 		state.History = append(state.History, DeliveryEvent{Kind: EventComputed, Version: computed.Version, RunID: runID, Note: "本轮仅已计算，确认前对接收方不可见"})
 		deliveries[node.ID] = state
+		if replacedStale {
+			return deliveries, "重新计算成功，产生新的待确认版本（失效旧候选仅留证，确认后才对接收方可见）"
+		}
 		return deliveries, "本轮结果仅已计算，确认后才对接收方可见"
 	}
 }
 
 // ConfirmDeliveries 把待确认投递标记为对接收方可见；all 为 true 时要求全部待确认一起确认，
 // 否则只允许明确指定的节点部分先行。已发布记录与证据日志保留。
-func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string) (map[string]DeliveryState, []string, error) {
+// 确认前逐项核对候选依据：已失效（来源运行失败）或流程修订已变化的候选必须拒绝。
+func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string, projectVersion string) (map[string]DeliveryState, []string, error) {
 	targets := map[string]bool{}
 	if all {
 		for nodeID, state := range deliveries {
-			if state.Pending != nil {
+			if state.Pending != nil && rejectReason(state.Pending, projectVersion) == "" {
 				targets[nodeID] = true
 			}
 		}
 		if len(targets) == 0 {
+			for _, state := range deliveries {
+				if state.Pending != nil {
+					return deliveries, nil, fmt.Errorf("没有可确认的待发布结果：节点 %s 的候选已失效（%s），需重新运行产生新候选", state.NodeID, rejectReason(state.Pending, projectVersion))
+				}
+			}
 			return deliveries, nil, fmt.Errorf("没有待确认的发布结果")
 		}
 	} else {
@@ -186,6 +243,9 @@ func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, al
 		if !exists || state.Pending == nil {
 			return deliveries, nil, fmt.Errorf("节点 %s 没有待确认的发布结果", nodeID)
 		}
+		if reason := rejectReason(state.Pending, projectVersion); reason != "" {
+			return deliveries, nil, fmt.Errorf("节点 %s 的待确认结果已失效，拒绝确认：%s", nodeID, reason)
+		}
 	}
 	for nodeID := range targets {
 		state := deliveries[nodeID]
@@ -198,6 +258,21 @@ func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, al
 	}
 	sort.Strings(confirmed)
 	return deliveries, confirmed, nil
+}
+
+// rejectReason 返回候选不可确认的原因（失去了哪项依据）；可确认时返回空串。
+func rejectReason(pending *Delivery, projectVersion string) string {
+	if pending.Stale {
+		reason := pending.StaleReason
+		if reason == "" {
+			reason = "来源运行失败，候选失去运行依据"
+		}
+		return reason
+	}
+	if projectVersion != "" && pending.ProjectVersion != "" && pending.ProjectVersion != projectVersion {
+		return "候选计算后工程（来源或流程）已被修改，失去流程修订依据，需重新运行产生新候选"
+	}
+	return ""
 }
 
 // rerunReason 给出执行对照：本轮重算是整流程重算、起点参数变化，
@@ -425,4 +500,10 @@ func hashProject(project Project) string {
 	encoded, _ := json.Marshal(project)
 	hash := sha256.Sum256(encoded)
 	return hex.EncodeToString(hash[:16])
+}
+
+// ProjectVersion 返回工程内容（不计 revision 号）的版本哈希，
+// 用于确认时核对待确认候选所依据的流程修订。
+func ProjectVersion(project Project) string {
+	return hashProject(project)
 }

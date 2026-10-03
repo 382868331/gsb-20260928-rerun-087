@@ -78,11 +78,14 @@ export type Delivery = {
   receiver: string;
   version: string;
   runId: string;
+  projectVersion?: string;
   rows: number;
   empty: boolean;
   summary: string;
+  stale?: boolean;
+  staleReason?: string;
 };
-export type DeliveryEvent = { kind: "computed" | "superseded" | "published"; version: string; runId: string; note: string };
+export type DeliveryEvent = { kind: "computed" | "superseded" | "published" | "invalidated"; version: string; runId: string; note: string };
 export type DeliveryState = {
   nodeId: string;
   receiver: string;

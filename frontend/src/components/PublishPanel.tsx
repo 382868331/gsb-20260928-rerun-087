@@ -10,6 +10,8 @@ type Props = {
 };
 
 function deliveryLabel(state: DeliveryState): string {
+  if (state.pending?.stale && state.published) return "新候选已失效，接收方仍看到已发布版本";
+  if (state.pending?.stale) return "待确认候选已失效，需重新运行";
   if (state.pending && state.published) return "新版本仅已计算，接收方仍看到已发布版本";
   if (state.pending) return "仅已计算，对接收方不可见";
   if (state.published) return "已对接收方可见";
@@ -25,7 +27,7 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
   const publishNodes = project.nodes.filter((node) => node.type === "publish");
   if (publishNodes.length === 0) return null;
   const states = publishNodes.map((node) => deliveries[node.id] ?? { nodeId: node.id, receiver: String(node.params.receiver ?? ""), history: [] });
-  const pendingCount = states.filter((state) => state.pending).length;
+  const pendingCount = states.filter((state) => state.pending && !state.pending.stale).length;
   const failed = run && !run.ok;
   return <section className="publish-panel">
     <div className="panel-title">
@@ -41,16 +43,18 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
       return <div key={state.nodeId} className="receiver-card">
         <div className="receiver-head">
           <b>{state.receiver || node.name}</b>
-          <span className={"delivery-state" + (state.published && !state.pending ? " visible" : state.pending ? " pending" : "")}>{deliveryLabel(state)}</span>
+          <span className={"delivery-state" + (state.pending?.stale ? " stale" : state.published && !state.pending ? " visible" : state.pending ? " pending" : "")}>{deliveryLabel(state)}</span>
         </div>
         {nodeResult && (nodeResult.status === "failed" || nodeResult.status === "blocked") && <div className="banner danger">分支{nodeResult.status === "failed" ? "失败" : "被阻断"}：{nodeResult.error ?? "本轮没有新结果"}</div>}
         {state.published && <p className="delivery-line visible-line">{describeDelivery("接收方当前可见", state.published)}</p>}
-        {state.pending && <p className="delivery-line pending-line">{describeDelivery("待确认（仅已计算）", state.pending)}</p>}
+        {state.pending && !state.pending.stale && <p className="delivery-line pending-line">{describeDelivery("待确认（仅已计算）", state.pending)}</p>}
+        {state.pending?.stale && <p className="delivery-line stale-line">{describeDelivery("已失效候选（仅供查阅差异，不能确认）", state.pending)}</p>}
+        {state.pending?.stale && <div className="banner danger">确认被拒绝：{state.pending.staleReason || "候选失去依据"}。需重新运行产生新候选。</div>}
         {!state.published && !state.pending && <p className="muted">该接收方还没有任何投递记录。</p>}
-        {state.pending && <button disabled={confirming} onClick={() => onConfirmOne(state.nodeId)}>允许该结果先行确认</button>}
+        {state.pending && !state.pending.stale && <button disabled={confirming} onClick={() => onConfirmOne(state.nodeId)}>允许该结果先行确认</button>}
         {state.history.length > 0 && <details className="evidence"><summary>投递证据（{state.history.length} 条，撤回修订不会删除）</summary>
           {state.history.map((event, index) => <div key={index} className="evidence-row">
-            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布" }[event.kind] ?? event.kind}</b>
+            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布", invalidated: "已失效" }[event.kind] ?? event.kind}</b>
             <span>版本 {event.version} · {event.runId}</span>
             <em>{event.note}</em>
           </div>)}

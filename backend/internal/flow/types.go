@@ -99,13 +99,18 @@ type NodeResult struct {
 
 // Delivery 是一次面向接收方的结果投递记录：版本、来源运行与行数。
 type Delivery struct {
-	NodeID   string `json:"nodeId"`
-	Receiver string `json:"receiver"`
-	Version  string `json:"version"`
-	RunID    string `json:"runId"`
-	Rows     int    `json:"rows"`
-	Empty    bool   `json:"empty"`
-	Summary  string `json:"summary"`
+	NodeID         string `json:"nodeId"`
+	Receiver       string `json:"receiver"`
+	Version        string `json:"version"`
+	RunID          string `json:"runId"`
+	ProjectVersion string `json:"projectVersion"`
+	Rows           int    `json:"rows"`
+	Empty          bool   `json:"empty"`
+	Summary        string `json:"summary"`
+	// Stale 标记该候选已失去依据（来源运行失败 / 流程修订变化），
+	// 只能查阅不能确认；StaleReason 说明失去了哪项依据。
+	Stale       bool   `json:"stale,omitempty"`
+	StaleReason string `json:"staleReason,omitempty"`
 }
 
 // DeliveryEvent 是追加式证据日志：已发出的结果即使撤回修订也保留。
@@ -117,9 +122,10 @@ type DeliveryEvent struct {
 }
 
 const (
-	EventComputed   = "computed"
-	EventSuperseded = "superseded"
-	EventPublished  = "published"
+	EventComputed    = "computed"
+	EventSuperseded  = "superseded"
+	EventPublished   = "published"
+	EventInvalidated = "invalidated"
 )
 
 // DeliveryState 记录一个发布节点的当前投递状态：

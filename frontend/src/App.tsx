@@ -191,7 +191,14 @@ export default function App() {
       setDeliveries(response.deliveries);
       setMessage(body.all ? "全部待确认结果已共同确认，对接收方可见。" : "该结果已先行确认，对接收方可见。");
     } catch (error) {
-      setMessage("确认失败：" + (error instanceof Error ? error.message : "后端不可用") + "，待确认状态未变更。");
+      setMessage("确认失败：" + (error instanceof Error ? error.message : "后端不可用") + "。");
+      // 确认被拒绝时后端会把失效候选落盘，重新拉取让面板立即展示失效原因。
+      try {
+        const loaded = await api.loadProject(project.id);
+        setDeliveries(loaded.deliveries ?? {});
+      } catch {
+        // 后端不可用时保留当前面板状态。
+      }
     } finally {
       setConfirming(false);
     }

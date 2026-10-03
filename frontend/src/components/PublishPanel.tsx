@@ -13,6 +13,7 @@ function deliveryLabel(state: DeliveryState): string {
   if (state.pending && state.published) return "新版本仅已计算，接收方仍看到已发布版本";
   if (state.pending) return "仅已计算，对接收方不可见";
   if (state.published) return "已对接收方可见";
+  if (state.invalidated) return "上一候选已失效，需重新计算后再确认";
   return "尚未产生投递";
 }
 
@@ -46,11 +47,12 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
         {nodeResult && (nodeResult.status === "failed" || nodeResult.status === "blocked") && <div className="banner danger">分支{nodeResult.status === "failed" ? "失败" : "被阻断"}：{nodeResult.error ?? "本轮没有新结果"}</div>}
         {state.published && <p className="delivery-line visible-line">{describeDelivery("接收方当前可见", state.published)}</p>}
         {state.pending && <p className="delivery-line pending-line">{describeDelivery("待确认（仅已计算）", state.pending)}</p>}
-        {!state.published && !state.pending && <p className="muted">该接收方还没有任何投递记录。</p>}
+        {state.invalidated && <p className="delivery-line invalidated-line">{describeDelivery("已失效候选（不可确认，仅供查阅差异）", state.invalidated)}</p>}
+        {!state.published && !state.pending && !state.invalidated && <p className="muted">该接收方还没有任何投递记录。</p>}
         {state.pending && <button disabled={confirming} onClick={() => onConfirmOne(state.nodeId)}>允许该结果先行确认</button>}
         {state.history.length > 0 && <details className="evidence"><summary>投递证据（{state.history.length} 条，撤回修订不会删除）</summary>
           {state.history.map((event, index) => <div key={index} className="evidence-row">
-            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布" }[event.kind] ?? event.kind}</b>
+            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布", invalidated: "已失效" }[event.kind] ?? event.kind}</b>
             <span>版本 {event.version} · {event.runId}</span>
             <em>{event.note}</em>
           </div>)}

@@ -67,6 +67,13 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 				results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: "缺少上一次运行产物", Reason: "不在本轮重算范围内，也找不到可复用的旧产物", Cause: CauseRerunForced}
 				continue
 			}
+			// 未重算的发布节点：待确认候选若基于旧的流程修订，立即失效，
+			// 不能因为分支未被波及就让陈旧候选继续可确认。
+			if node.Type == "publish" {
+				if state := updatedDeliveries[nodeID]; state.Pending != nil && state.Pending.ProjectVersion != projectVersion {
+					updatedDeliveries = invalidatePending(updatedDeliveries, node, runID, "依据的流程修订已变化：来源或步骤在计算后被编辑，旧待确认候选失效")
+				}
+			}
 			results[nodeID] = NodeResult{NodeID: nodeID, Status: "reused", Artifact: &artifact, ReusedFrom: artifact.RunID, Cause: CauseReused, Reason: fmt.Sprintf("参数与上游产物版本未变，沿用 %s 的产物（版本 %s）", artifact.RunID, artifact.Version)}
 			continue
 		}
@@ -97,6 +104,9 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			ok = false
 			results[nodeID] = NodeResult{NodeID: nodeID, Status: "blocked", Error: fmt.Sprintf("上游 %s 本轮未产出有效数据，拒绝使用旧结果", blockedBy), Reason: "依赖的上游失败或缺失，本轮不会沿用旧产物"}
 			delete(artifacts, nodeID)
+			if node.Type == "publish" {
+				updatedDeliveries = invalidatePending(updatedDeliveries, node, runID, fmt.Sprintf("本轮被阻断：上游 %s 未产出有效数据，待确认候选失去运行结果依据", blockedBy))
+			}
 			continue
 		}
 		cause, reason := rerunReason(node, started[nodeID], startNodeIDs, incoming[nodeID], upstreamVersions, baselineVersions, artifacts)
@@ -105,12 +115,15 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			ok = false
 			results[nodeID] = NodeResult{NodeID: nodeID, Status: "failed", Error: err.Error(), Reason: "执行失败，已阻断下游并清除旧产物", Cause: cause}
 			delete(artifacts, nodeID)
+			if node.Type == "publish" {
+				updatedDeliveries = invalidatePending(updatedDeliveries, node, runID, "本轮执行失败，待确认候选失去运行结果依据")
+			}
 			continue
 		}
 		artifacts[nodeID] = artifact
 		if node.Type == "publish" {
 			var deliveryNote string
-			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID)
+			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID, projectVersion)
 			reason = reason + "；" + deliveryNote
 		}
 		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
@@ -128,7 +141,7 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 // - 版本与已发布一致时不重复发布，保留原已发布记录；
 // - 版本与待确认一致时沿用待确认结果；
 // - 共享上游变化导致版本不同时，旧待确认被取代（需重新核对来源），已发布版本保留。
-func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string) (map[string]DeliveryState, string) {
+func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string, projectVersion string) (map[string]DeliveryState, string) {
 	state := deliveries[node.ID]
 	state.NodeID = node.ID
 	state.Receiver = paramString(node.Params["receiver"])
@@ -136,19 +149,24 @@ func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, arti
 		state.History = []DeliveryEvent{}
 	}
 	computed := Delivery{
-		NodeID:   node.ID,
-		Receiver: state.Receiver,
-		Version:  artifact.Version,
-		RunID:    runID,
-		Rows:     len(artifact.Rows),
-		Empty:    len(artifact.Rows) == 0,
-		Summary:  artifact.Summary,
+		NodeID:         node.ID,
+		Receiver:       state.Receiver,
+		Version:        artifact.Version,
+		RunID:          runID,
+		ProjectVersion: projectVersion,
+		Rows:           len(artifact.Rows),
+		Empty:          len(artifact.Rows) == 0,
+		Summary:        artifact.Summary,
 	}
 	switch {
 	case state.Published != nil && state.Published.Version == computed.Version:
+		// 已发布版本与本轮一致：不重复发布；若此前有失效候选，本轮成功计算
+		// 说明依据已恢复，清除失效标记以免与当前状态混淆。
+		state.Invalidated = nil
 		deliveries[node.ID] = state
 		return deliveries, "版本与已发布结果一致，不重复发布"
-	case state.Pending != nil && state.Pending.Version == computed.Version:
+	case state.Pending != nil && state.Pending.Version == computed.Version && state.Pending.ProjectVersion == projectVersion:
+		state.Invalidated = nil
 		deliveries[node.ID] = state
 		return deliveries, "待确认版本未变，沿用待确认结果"
 	default:
@@ -156,15 +174,81 @@ func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, arti
 			state.History = append(state.History, DeliveryEvent{Kind: EventSuperseded, Version: state.Pending.Version, RunID: runID, Note: "上游来源变化，旧待确认结果被取代，需重新核对"})
 		}
 		state.Pending = &computed
+		state.Invalidated = nil
 		state.History = append(state.History, DeliveryEvent{Kind: EventComputed, Version: computed.Version, RunID: runID, Note: "本轮仅已计算，确认前对接收方不可见"})
 		deliveries[node.ID] = state
 		return deliveries, "本轮结果仅已计算，确认后才对接收方可见"
 	}
 }
 
+// invalidatePending 把待确认候选标记为失效：候选本身保留在 Invalidated 供查阅
+// 失败前后差异，但不再可被确认；证据日志追加失效原因。
+func invalidatePending(deliveries map[string]DeliveryState, node Node, runID string, note string) map[string]DeliveryState {
+	state := deliveries[node.ID]
+	if state.Pending == nil {
+		return deliveries
+	}
+	if state.NodeID == "" {
+		state.NodeID = node.ID
+	}
+	if state.Receiver == "" {
+		state.Receiver = paramString(node.Params["receiver"])
+	}
+	invalidated := *state.Pending
+	state.Invalidated = &invalidated
+	state.Pending = nil
+	state.History = append(state.History, DeliveryEvent{Kind: EventInvalidated, Version: invalidated.Version, RunID: runID, Note: note})
+	deliveries[node.ID] = state
+	return deliveries
+}
+
+// pendingBasisError 逐项核对待确认候选的依据：来源与流程修订（工程内容哈希）、
+// 运行结果（上游产物仍在）以及实际采用的版本关系（上游产物版本重算比对）。
+// 返回空串表示候选仍然有效，否则说明失去了哪项依据。
+func pendingBasisError(project Project, state DeliveryState, stored map[string]Artifact) string {
+	pending := state.Pending
+	if pending == nil {
+		if state.Invalidated != nil {
+			return "上一候选已因依据变化失效（详见投递证据），需重新计算产生新候选后再确认"
+		}
+		return "没有待确认的发布结果"
+	}
+	if pending.ProjectVersion != hashProject(project) {
+		return "依据的流程修订已变化：来源或步骤在计算后被编辑，该候选已失效"
+	}
+	var node *Node
+	incoming := make([]Edge, 0)
+	for index := range project.Nodes {
+		if project.Nodes[index].ID == state.NodeID {
+			node = &project.Nodes[index]
+		}
+	}
+	if node == nil {
+		return "对应的发布步骤已不在当前工程中，该候选已失效"
+	}
+	for _, edge := range project.Edges {
+		if edge.Target == state.NodeID {
+			incoming = append(incoming, edge)
+		}
+	}
+	upstreamVersions := make(map[string]string)
+	for _, edge := range incoming {
+		artifact, exists := stored[edge.Source]
+		if !exists {
+			return fmt.Sprintf("依据的运行结果已失效：上游 %s 本轮失败或被阻断，没有可用产物", edge.Source)
+		}
+		upstreamVersions[edge.Source] = artifact.Version
+	}
+	if expected := nodeVersion(*node, upstreamVersions); expected != pending.Version {
+		return "依据的上游产物版本已变化：上游被重算或来源修订，该候选已失效"
+	}
+	return ""
+}
+
 // ConfirmDeliveries 把待确认投递标记为对接收方可见；all 为 true 时要求全部待确认一起确认，
-// 否则只允许明确指定的节点部分先行。已发布记录与证据日志保留。
-func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string) (map[string]DeliveryState, []string, error) {
+// 否则只允许明确指定的节点部分先行。确认前逐项核对候选依据（来源、流程修订、运行结果），
+// 任一目标失效则整体拒绝并把它标记为失效候选；已发布记录与证据日志保留。
+func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string, project Project, stored map[string]Artifact) (map[string]DeliveryState, []string, error) {
 	targets := map[string]bool{}
 	if all {
 		for nodeID, state := range deliveries {
@@ -181,11 +265,38 @@ func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, al
 		}
 	}
 	confirmed := make([]string, 0, len(targets))
+	// 先整体核对：任何一个目标失效都拒绝本次确认，保证全部确认只在
+	// 当时每个拟发布结果都满足条件时发生；失效候选就地标记并留证。
+	basisErrors := make(map[string]string)
 	for nodeID := range targets {
 		state, exists := deliveries[nodeID]
-		if !exists || state.Pending == nil {
+		if !exists {
 			return deliveries, nil, fmt.Errorf("节点 %s 没有待确认的发布结果", nodeID)
 		}
+		if basisError := pendingBasisError(project, state, stored); basisError != "" {
+			basisErrors[nodeID] = basisError
+		}
+	}
+	if len(basisErrors) > 0 {
+		ids := make([]string, 0, len(basisErrors))
+		for nodeID := range basisErrors {
+			ids = append(ids, nodeID)
+		}
+		sort.Strings(ids)
+		messages := make([]string, 0, len(ids))
+		for _, nodeID := range ids {
+			if deliveries[nodeID].Pending != nil {
+				node := Node{ID: nodeID, Params: map[string]any{"receiver": deliveries[nodeID].Receiver}}
+				for index := range project.Nodes {
+					if project.Nodes[index].ID == nodeID {
+						node = project.Nodes[index]
+					}
+				}
+				deliveries = invalidatePending(deliveries, node, runID, "确认被拒绝："+basisErrors[nodeID])
+			}
+			messages = append(messages, fmt.Sprintf("节点 %s：%s", nodeID, basisErrors[nodeID]))
+		}
+		return deliveries, nil, fmt.Errorf("确认被拒绝，候选已失效（%s）", strings.Join(messages, "；"))
 	}
 	for nodeID := range targets {
 		state := deliveries[nodeID]

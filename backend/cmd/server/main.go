@@ -224,21 +224,24 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		}
 		store.mu.Lock()
 		defer store.mu.Unlock()
-		if _, ok := store.projects[id]; !ok {
+		project, ok := store.projects[id]
+		if !ok {
 			writeError(w, http.StatusNotFound, "请先保存工程")
 			return
 		}
 		if store.deliveries[id] == nil {
 			store.deliveries[id] = map[string]flow.DeliveryState{}
 		}
-		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID())
-		if err != nil {
-			writeError(w, http.StatusConflict, err.Error())
+		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID(), project, store.artifacts[id])
+		store.deliveries[id] = updated
+		// 即使确认被拒绝也要落盘：失效候选的标记与证据需要持久化，
+		// 重新打开后仍能看到候选为何失效。
+		if saveErr := store.saveLocked(); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
 			return
 		}
-		store.deliveries[id] = updated
-		if err := store.saveLocked(); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "deliveries": updated})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated})

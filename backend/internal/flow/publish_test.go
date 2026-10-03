@@ -57,9 +57,10 @@ func TestRunComputesDeliveriesForMultipleReceivers(t *testing.T) {
 }
 
 func TestConfirmAllAndPartialDeliveries(t *testing.T) {
-	first := Run(publishProject(), "run-1", nil, nil, nil, t.TempDir())
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	// 明确允许部分先行：只确认财务。
-	updated, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1")
+	updated, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", project, storedFrom(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 		t.Fatalf("运营应仍为仅已计算: %#v", updated["pub-ops"])
 	}
 	// 全部共同确认：剩余待确认一起确认。
-	final, confirmedAll, err := ConfirmDeliveries(updated, nil, true, "run-c2")
+	final, confirmedAll, err := ConfirmDeliveries(updated, nil, true, "run-c2", project, storedFrom(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +84,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 	if final["pub-ops"].Published == nil {
 		t.Fatal("运营应已对接收方可见")
 	}
-	if _, _, err := ConfirmDeliveries(final, nil, true, "run-c3"); err == nil {
+	if _, _, err := ConfirmDeliveries(final, nil, true, "run-c3", project, storedFrom(first)); err == nil {
 		t.Fatal("没有待确认结果时必须报错")
 	}
 }
@@ -91,7 +92,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 func TestRerunDoesNotRepublishConfirmedDelivery(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, nil, true, "run-c1")
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, nil, true, "run-c1", project, storedFrom(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestSharedUpstreamChangeRechecksPendingKeepsPublished(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	// 只确认财务，运营保持待确认。
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1")
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", project, storedFrom(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestSharedUpstreamChangeRechecksPendingKeepsPublished(t *testing.T) {
 func TestPartialFailureExplainsComputedVsVisible(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1")
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", project, storedFrom(first))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,11 +174,18 @@ func TestPartialFailureExplainsComputedVsVisible(t *testing.T) {
 		t.Fatal("已对接收方可见的结果不能被失败影响")
 	}
 	ops := second.Deliveries["pub-ops"]
-	if ops.Pending == nil || ops.Pending.RunID != "run-1" {
-		t.Fatalf("失败分支应保留此前仅已计算的待确认结果: %#v", ops)
+	if ops.Pending != nil {
+		t.Fatalf("失败分支的陈旧待确认候选必须失效: %#v", ops)
+	}
+	if ops.Invalidated == nil || ops.Invalidated.RunID != "run-1" {
+		t.Fatalf("失效候选应保留供查阅失败前后差异: %#v", ops)
 	}
 	if ops.Published != nil {
 		t.Fatal("未确认的失败分支结果不能变成对接收方可见")
+	}
+	// 失效候选不能被确认发布。
+	if _, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, "run-c2", project, storedFrom(second)); err == nil {
+		t.Fatal("失效候选必须拒绝确认")
 	}
 }
 
@@ -192,11 +200,139 @@ func TestEmptyOutputPublishesAsEmptyDelivery(t *testing.T) {
 	if fin.Pending == nil || !fin.Pending.Empty || fin.Pending.Rows != 0 {
 		t.Fatalf("空输出应标记为空表投递: %#v", fin.Pending)
 	}
-	confirmed, _, err := ConfirmDeliveries(result.Deliveries, []string{"pub-fin"}, false, "run-c1")
+	confirmed, _, err := ConfirmDeliveries(result.Deliveries, []string{"pub-fin"}, false, "run-c1", project, storedFrom(result))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if confirmed["pub-fin"].Published == nil || !confirmed["pub-fin"].Published.Empty {
 		t.Fatal("空表投递也应可确认并对齐接收方可见内容")
+	}
+}
+
+// 完整回归：先部分发布，共享源改坏后重跑，另一接收方被阻断，
+// 其遗留待确认候选必须失效且确认被明确拒绝；恢复来源重算后才能确认。
+func TestStalePendingCannotPublishAfterSharedSourceFailure(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	if !first.OK {
+		t.Fatal("first run failed")
+	}
+	// 部分确认：财务先行发布，运营保持待确认。
+	deliveries, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", project, storedFrom(first))
+	if err != nil || len(confirmed) != 1 {
+		t.Fatalf("partial confirm failed: %v %v", confirmed, err)
+	}
+	staleOpsVersion := deliveries["pub-ops"].Pending.Version
+
+	// 共享来源改成无效内容并整流程重跑：两个发布分支都被阻断。
+	broken := publishProject()
+	broken.Nodes[0].Params["content"] = "这不是有效的CSV表头行"
+	broken.Nodes[0].Params["format"] = "json"
+	second := Run(broken, "run-2", nil, storedFrom(first), deliveries, t.TempDir())
+	if second.OK {
+		t.Fatal("broken source run should fail")
+	}
+	if second.Results["pub-ops"].Status != "blocked" {
+		t.Fatalf("运营发布应被阻断: %#v", second.Results["pub-ops"])
+	}
+	ops := second.Deliveries["pub-ops"]
+	if ops.Pending != nil {
+		t.Fatalf("共享源失败后陈旧待确认候选必须失效: %#v", ops)
+	}
+	if ops.Invalidated == nil || ops.Invalidated.Version != staleOpsVersion {
+		t.Fatalf("失效候选应保留供查阅: %#v", ops)
+	}
+	// 已发布的财务结果保留实际发布事实。
+	if fin := second.Deliveries["pub-fin"]; fin.Published == nil || fin.Published.RunID != "run-1" {
+		t.Fatalf("已发布历史必须保留: %#v", fin)
+	}
+
+	// 本轮失败不能成为发布旧候选的通道：确认被明确拒绝并说明依据。
+	rejected, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, "run-c2", broken, storedFrom(second))
+	if err == nil {
+		t.Fatal("失效候选必须拒绝确认")
+	}
+	if rejected["pub-ops"].Published != nil {
+		t.Fatal("失效候选不能被发布")
+	}
+
+	// 恢复来源为相同文字并重算：产生新的待确认候选（版本关系重新核对），
+	// 这次确认成功；已失效的旧候选记录仍留证。
+	restored := publishProject()
+	third := Run(restored, "run-3", nil, storedFrom(second), rejected, t.TempDir())
+	if !third.OK {
+		t.Fatalf("restored run failed: %#v", third.Results["shared"])
+	}
+	opsAfter := third.Deliveries["pub-ops"]
+	if opsAfter.Pending == nil || opsAfter.Pending.RunID != "run-3" {
+		t.Fatalf("恢复后应产生新的待确认候选: %#v", opsAfter)
+	}
+	final, confirmed, err := ConfirmDeliveries(third.Deliveries, []string{"pub-ops"}, false, "run-c3", restored, storedFrom(third))
+	if err != nil || len(confirmed) != 1 {
+		t.Fatalf("恢复后的有效候选应可确认: %v", err)
+	}
+	if final["pub-ops"].Published == nil || final["pub-ops"].Published.RunID != "run-3" {
+		t.Fatalf("接收方应看到当时获确认的有效结果: %#v", final["pub-ops"])
+	}
+	invalidatedSeen := false
+	for _, event := range final["pub-ops"].History {
+		if event.Kind == EventInvalidated {
+			invalidatedSeen = true
+		}
+	}
+	if !invalidatedSeen {
+		t.Fatal("失效证据必须保留在投递历史中")
+	}
+}
+
+// 预览候选后不运行直接编辑来源：确认必须因流程修订依据变化而拒绝。
+func TestConfirmRejectedAfterSourceEditWithoutRun(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	edited := publishProject()
+	edited.Nodes[0].Params["content"] = "id,city,amount\n9,Z,99"
+	updated, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-ops"}, false, "run-c1", edited, storedFrom(first))
+	if err == nil {
+		t.Fatal("来源编辑后确认旧候选必须被拒绝")
+	}
+	if !strings.Contains(err.Error(), "流程修订") {
+		t.Fatalf("拒绝原因应说明失去的依据: %v", err)
+	}
+	if updated["pub-ops"].Pending != nil || updated["pub-ops"].Invalidated == nil {
+		t.Fatalf("被拒绝的候选应标记失效: %#v", updated["pub-ops"])
+	}
+	if updated["pub-ops"].Published != nil {
+		t.Fatal("被拒绝的候选不能变成已发布")
+	}
+}
+
+// 全部确认要求当时每个拟发布结果都满足条件：一个失效则整体拒绝，
+// 未失效的候选保持原样不被悄悄发布。
+func TestConfirmAllIsAtomicWhenAnyCandidateStale(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	// 只让运营分支失败：财务产生新待确认，运营候选失效。
+	broken := publishProject()
+	broken.Nodes[2].Params["operation"] = "unknown_op"
+	second := Run(broken, "run-2", nil, storedFrom(first), first.Deliveries, t.TempDir())
+	if second.OK {
+		t.Fatal("second run should fail")
+	}
+	if second.Deliveries["pub-fin"].Pending == nil {
+		t.Fatal("成功分支应有新的待确认候选")
+	}
+	if second.Deliveries["pub-ops"].Pending != nil {
+		t.Fatal("失败分支候选必须失效")
+	}
+	// 全部确认：运营失效（不在待确认集合），财务单独满足条件可确认。
+	final, confirmed, err := ConfirmDeliveries(second.Deliveries, nil, true, "run-c2", broken, storedFrom(second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(confirmed) != 1 || confirmed[0] != "pub-fin" {
+		t.Fatalf("只有满足条件的候选才能确认: %v", confirmed)
+	}
+	if final["pub-ops"].Published != nil {
+		t.Fatal("失效候选不能随全部确认被悄悄发布")
 	}
 }

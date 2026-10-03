@@ -85,7 +85,8 @@ export type Delivery = {
   stale?: boolean;
   staleReason?: string;
 };
-export type DeliveryEvent = { kind: "computed" | "superseded" | "published" | "invalidated"; version: string; runId: string; note: string };
+export type DeliveryEvent = { kind: "computed" | "superseded" | "published" | "invalidated" | "rejected"; version: string; runId: string; note: string };
+export type ExpectedCandidate = { nodeId: string; version: string; runId: string };
 export type DeliveryState = {
   nodeId: string;
   receiver: string;

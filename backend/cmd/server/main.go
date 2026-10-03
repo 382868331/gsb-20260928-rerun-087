@@ -151,6 +151,11 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			project.Revision = 1
 		}
 		store.projects[project.ID] = project
+		// 工程内容一旦变化，依据旧修订计算的待确认候选立即永久失效并持久化：
+		// 失效状态不存在于单次请求判断里，之后恢复原文也不能恢复其发布资格。
+		if store.deliveries[project.ID] != nil {
+			store.deliveries[project.ID] = flow.InvalidatePendingForProject(store.deliveries[project.ID], flow.ProjectVersion(project))
+		}
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -215,8 +220,9 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 	mux.HandleFunc("POST /api/projects/{id}/confirm", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
 		var body struct {
-			NodeIDs []string `json:"nodeIds"`
-			All     bool     `json:"all"`
+			NodeIDs  []string                 `json:"nodeIds"`
+			All      bool                     `json:"all"`
+			Expected []flow.ExpectedCandidate `json:"expected"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "确认请求 JSON 无效")
@@ -232,9 +238,15 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		if store.deliveries[id] == nil {
 			store.deliveries[id] = map[string]flow.DeliveryState{}
 		}
-		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID(), flow.ProjectVersion(project))
+		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, body.Expected, newRunID(), flow.ProjectVersion(project))
 		if err != nil {
-			writeError(w, http.StatusConflict, err.Error())
+			// 拒绝也要持久化：失效标记与拒绝证据落盘，恢复原文不能恢复发布资格。
+			store.deliveries[id] = updated
+			if saveErr := store.saveLocked(); saveErr != nil {
+				writeError(w, http.StatusInternalServerError, saveErr.Error())
+				return
+			}
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "deliveries": updated})
 			return
 		}
 		store.deliveries[id] = updated

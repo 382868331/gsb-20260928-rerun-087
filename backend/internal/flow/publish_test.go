@@ -60,7 +60,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	// 明确允许部分先行：只确认财务。
-	updated, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project))
+	updated, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 		t.Fatalf("运营应仍为仅已计算: %#v", updated["pub-ops"])
 	}
 	// 全部共同确认：剩余待确认一起确认。
-	final, confirmedAll, err := ConfirmDeliveries(updated, nil, true, "run-c2", ProjectVersion(project))
+	final, confirmedAll, err := ConfirmDeliveries(updated, nil, true, nil, "run-c2", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 	if final["pub-ops"].Published == nil {
 		t.Fatal("运营应已对接收方可见")
 	}
-	if _, _, err := ConfirmDeliveries(final, nil, true, "run-c3", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(final, nil, true, nil, "run-c3", ProjectVersion(project)); err == nil {
 		t.Fatal("没有待确认结果时必须报错")
 	}
 }
@@ -92,7 +92,7 @@ func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 func TestRerunDoesNotRepublishConfirmedDelivery(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, nil, true, "run-c1", ProjectVersion(project))
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, nil, true, nil, "run-c1", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestSharedUpstreamChangeRechecksPendingKeepsPublished(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
 	// 只确认财务，运营保持待确认。
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project))
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestSharedUpstreamChangeRechecksPendingKeepsPublished(t *testing.T) {
 func TestPartialFailureExplainsComputedVsVisible(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
-	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project))
+	deliveries, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestPartialFailureExplainsComputedVsVisible(t *testing.T) {
 		t.Fatal("未确认的失败分支结果不能变成对接收方可见")
 	}
 	// 本轮失败不能成为发布旧候选的通道：确认必须被拒绝并说明依据。
-	if _, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, "run-c2", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, nil, "run-c2", ProjectVersion(project)); err == nil {
 		t.Fatal("已失效候选的确认必须被拒绝")
 	} else if !strings.Contains(err.Error(), "失效") {
 		t.Fatalf("拒绝原因应说明候选已失效: %v", err)
@@ -211,7 +211,7 @@ func TestEmptyOutputPublishesAsEmptyDelivery(t *testing.T) {
 	if fin.Pending == nil || !fin.Pending.Empty || fin.Pending.Rows != 0 {
 		t.Fatalf("空输出应标记为空表投递: %#v", fin.Pending)
 	}
-	confirmed, _, err := ConfirmDeliveries(result.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project))
+	confirmed, _, err := ConfirmDeliveries(result.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestStaleCandidateRejectedUntilFreshRecompute(t *testing.T) {
 		t.Fatal("first run failed")
 	}
 	// 部分确认：财务先行发布，运营保持待确认。
-	deliveries, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project))
+	deliveries, confirmed, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project))
 	if err != nil || len(confirmed) != 1 {
 		t.Fatalf("partial confirm: %v %v", confirmed, err)
 	}
@@ -256,11 +256,11 @@ func TestStaleCandidateRejectedUntilFreshRecompute(t *testing.T) {
 	if ops.Pending == nil || !ops.Pending.Stale || ops.Pending.StaleReason == "" {
 		t.Fatalf("遗留候选应失效并说明依据: %#v", ops)
 	}
-	if _, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, "run-c2", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(second.Deliveries, []string{"pub-ops"}, false, nil, "run-c2", ProjectVersion(project)); err == nil {
 		t.Fatal("本轮失败不能成为发布旧候选的通道")
 	}
 	// 全部确认也不能夹带失效候选。
-	if _, _, err := ConfirmDeliveries(second.Deliveries, nil, true, "run-c3", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(second.Deliveries, nil, true, nil, "run-c3", ProjectVersion(project)); err == nil {
 		t.Fatal("只剩失效候选时全部确认必须报错")
 	}
 
@@ -275,7 +275,7 @@ func TestStaleCandidateRejectedUntilFreshRecompute(t *testing.T) {
 		t.Fatalf("重算成功应产生全新的待确认版本: %#v", opsAfter)
 	}
 	// 新候选可以确认；接收方看到的是当时获确认的有效结果。
-	final, confirmedAll, err := ConfirmDeliveries(third.Deliveries, nil, true, "run-c4", ProjectVersion(project))
+	final, confirmedAll, err := ConfirmDeliveries(third.Deliveries, nil, true, nil, "run-c4", ProjectVersion(project))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,16 +299,213 @@ func TestConfirmRejectsCandidateAfterSourceEditWithoutRerun(t *testing.T) {
 	}
 	// 候选计算后工程被修改（例如保存了新的来源内容），流程修订已变化。
 	project.Nodes[0].Params["content"] = "id,city,amount\n9,Z,99"
-	if _, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, "run-c1", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(first.Deliveries, []string{"pub-fin"}, false, nil, "run-c1", ProjectVersion(project)); err == nil {
 		t.Fatal("编辑来源后旧候选必须被拒绝")
 	} else if !strings.Contains(err.Error(), "流程修订") {
 		t.Fatalf("拒绝原因应说明失去流程修订依据: %v", err)
 	}
-	if _, _, err := ConfirmDeliveries(first.Deliveries, nil, true, "run-c2", ProjectVersion(project)); err == nil {
+	if _, _, err := ConfirmDeliveries(first.Deliveries, nil, true, nil, "run-c2", ProjectVersion(project)); err == nil {
 		t.Fatal("全部确认同样必须拒绝失去修订依据的候选")
 	}
-	// 工程未变化时确认不受影响。
-	if _, confirmed, err := ConfirmDeliveries(first.Deliveries, nil, true, "run-c3", ProjectVersion(publishProject())); err != nil || len(confirmed) != 2 {
-		t.Fatalf("依据未变时应正常确认: %v %v", confirmed, err)
+	// 被拒绝过的候选只能留作比较：即使把来源恢复原文（流程修订哈希一致），
+	// 失效状态是持久化的，不能恢复其发布资格。
+	if _, _, err := ConfirmDeliveries(first.Deliveries, nil, true, nil, "run-c3", ProjectVersion(publishProject())); err == nil {
+		t.Fatal("恢复原文不能恢复被拒绝候选的发布资格")
+	}
+	if state := first.Deliveries["pub-fin"]; state.Pending == nil || !state.Pending.Stale {
+		t.Fatalf("被拒绝后应永久失效、仅留作比较: %#v", state.Pending)
+	}
+	rejected := false
+	for _, event := range first.Deliveries["pub-fin"].History {
+		if event.Kind == EventRejected {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Fatal("每次拒绝都必须留下可追溯的证据")
+	}
+	// 恢复原文并重跑：产生全新的待确认候选，新候选可以确认。
+	third := Run(publishProject(), "run-3", nil, storedFrom(first), first.Deliveries, t.TempDir())
+	if !third.OK {
+		t.Fatal("restored source should run")
+	}
+	final, confirmed, err := ConfirmDeliveries(third.Deliveries, nil, true, nil, "run-c4", ProjectVersion(publishProject()))
+	if err != nil || len(confirmed) != 2 {
+		t.Fatalf("重算产生的新候选应可确认: %v %v", confirmed, err)
+	}
+	if final["pub-fin"].Published == nil || final["pub-fin"].Published.RunID != "run-3" {
+		t.Fatalf("接收方应看到 run-3 确认的新结果: %#v", final["pub-fin"])
+	}
+}
+
+func candidateOf(state DeliveryState) ExpectedCandidate {
+	return ExpectedCandidate{NodeID: state.NodeID, Version: state.Pending.Version, RunID: state.Pending.RunID}
+}
+
+// 失效状态持久化：保存时工程已变化 → 候选永久失效；恢复原文也不能恢复发布资格。
+func TestSaveInvalidatesPendingAndRevertDoesNotRestoreEligibility(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	if !first.OK {
+		t.Fatal("first run failed")
+	}
+	deliveries := first.Deliveries
+	originalContent := project.Nodes[0].Params["content"]
+
+	// 候选计算后修改工程并保存：待确认候选立即失效（不依赖某次确认请求的判断）。
+	project.Nodes[0].Params["content"] = "id,city,amount\n9,Z,99"
+	deliveries = InvalidatePendingForProject(deliveries, ProjectVersion(project))
+	for _, nodeID := range []string{"pub-fin", "pub-ops"} {
+		pending := deliveries[nodeID].Pending
+		if pending == nil || !pending.Stale || pending.StaleReason == "" {
+			t.Fatalf("%s 保存后应立即失效并说明依据: %#v", nodeID, pending)
+		}
+	}
+	// 把来源恢复原文（不重跑）：失效不能复活，候选只能留作比较。
+	project.Nodes[0].Params["content"] = originalContent
+	deliveries = InvalidatePendingForProject(deliveries, ProjectVersion(project))
+	if _, _, err := ConfirmDeliveries(deliveries, nil, true, nil, "run-c1", ProjectVersion(project)); err == nil {
+		t.Fatal("恢复原文不能恢复被拒绝候选的发布资格")
+	}
+	for _, nodeID := range []string{"pub-fin", "pub-ops"} {
+		pending := deliveries[nodeID].Pending
+		if pending == nil || !pending.Stale {
+			t.Fatalf("%s 失效候选必须保留供比较: %#v", nodeID, pending)
+		}
+		if deliveries[nodeID].Published != nil {
+			t.Fatalf("%s 失效候选不能变成对接收方可见", nodeID)
+		}
+	}
+	// 拒绝与失效都要留下可追溯证据。
+	foundInvalidated, foundRejected := false, false
+	for _, event := range deliveries["pub-fin"].History {
+		if event.Kind == EventInvalidated {
+			foundInvalidated = true
+		}
+		if event.Kind == EventRejected {
+			foundRejected = true
+		}
+	}
+	if !foundInvalidated || !foundRejected {
+		t.Fatalf("失效与拒绝都必须可追溯: %#v", deliveries["pub-fin"].History)
+	}
+}
+
+// 确认绑定用户实际看过的候选版本与运行批次：旧页面迟到的确认不能误发布新结果。
+func TestConfirmBindsToSeenCandidateVersionAndRun(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	seen := candidateOf(first.Deliveries["pub-fin"])
+
+	// 另一个窗口重跑：来源变化产生全新候选。
+	project.Nodes[0].Params["content"] = "id,city,amount\n1,S,10\n2,B,20\n3,S,30"
+	second := Run(project, "run-2", nil, storedFrom(first), first.Deliveries, t.TempDir())
+	if !second.OK {
+		t.Fatal("second run failed")
+	}
+	current := candidateOf(second.Deliveries["pub-fin"])
+	if current.Version == seen.Version {
+		t.Fatal("来源变化后候选版本必须不同")
+	}
+
+	// 旧页面迟到的确认（绑定旧版本/旧批次）：必须拒绝，且不能误发布新候选。
+	deliveries, confirmed, err := ConfirmDeliveries(second.Deliveries, []string{"pub-fin"}, false, []ExpectedCandidate{seen}, "run-c1", ProjectVersion(project))
+	if err == nil || len(confirmed) != 0 {
+		t.Fatalf("迟到的旧确认必须被拒绝: %v %v", confirmed, err)
+	}
+	if deliveries["pub-fin"].Published != nil {
+		t.Fatal("迟到的旧确认不能误发布新结果")
+	}
+	if deliveries["pub-fin"].Pending == nil || deliveries["pub-fin"].Pending.Stale {
+		t.Fatal("新候选本身有效，只是旧确认不被接受")
+	}
+	rejected := false
+	for _, event := range deliveries["pub-fin"].History {
+		if event.Kind == EventRejected {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Fatal("迟到确认被拒绝必须留下证据")
+	}
+
+	// 看过新候选的页面确认：绑定当前版本与批次，正常发布。
+	final, confirmed, err := ConfirmDeliveries(deliveries, []string{"pub-fin"}, false, []ExpectedCandidate{candidateOf(deliveries["pub-fin"])}, "run-c2", ProjectVersion(project))
+	if err != nil || len(confirmed) != 1 {
+		t.Fatalf("看过当前候选的确认应成功: %v %v", confirmed, err)
+	}
+	if final["pub-fin"].Published == nil || final["pub-fin"].Published.RunID != "run-2" {
+		t.Fatalf("应发布 run-2 的候选: %#v", final["pub-fin"])
+	}
+}
+
+// 共同确认遇到一条失效分支：整批拒绝，不能部分发布其它分支。
+func TestConfirmAllIsAtomicWhenAnyBranchStale(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	// 运营分支来源改坏并重跑：运营候选失效，财务候选本身仍有效。
+	project.Nodes[2].Params["operation"] = "unknown_op"
+	second := Run(project, "run-2", []string{"ops"}, storedFrom(first), first.Deliveries, t.TempDir())
+	if second.OK {
+		t.Fatal("broken branch must fail")
+	}
+	if second.Deliveries["pub-ops"].Pending == nil || !second.Deliveries["pub-ops"].Pending.Stale {
+		t.Fatal("运营候选应已失效")
+	}
+	// 共同确认：财务候选单独看是有效的，但整批必须被拒绝。
+	deliveries, confirmed, err := ConfirmDeliveries(second.Deliveries, nil, true, nil, "run-c1", ProjectVersion(project))
+	if err == nil || len(confirmed) != 0 {
+		t.Fatalf("存在失效分支时共同确认必须整批拒绝: %v %v", confirmed, err)
+	}
+	if deliveries["pub-fin"].Published != nil || deliveries["pub-fin"].Pending == nil {
+		t.Fatalf("不能部分发布财务分支: %#v", deliveries["pub-fin"])
+	}
+	// 修复后整流程重跑（被拒绝过的候选不会复活，需重新计算），两个候选都有效时共同确认才放行。
+	project.Nodes[2].Params["operation"] = "passthrough"
+	third := Run(project, "run-3", nil, storedFrom(first), deliveries, t.TempDir())
+	if !third.OK {
+		t.Fatal("recovered run failed")
+	}
+	final, confirmed, err := ConfirmDeliveries(third.Deliveries, nil, true, nil, "run-c2", ProjectVersion(project))
+	if err != nil || len(confirmed) != 2 {
+		t.Fatalf("全部有效后共同确认应整批放行: %v %v", confirmed, err)
+	}
+	if final["pub-fin"].Published == nil || final["pub-ops"].Published == nil {
+		t.Fatal("两个接收方都应可见")
+	}
+}
+
+// 重复确认请求是幂等的：同一候选重复确认不重复发布、不重复记录。
+func TestDuplicateConfirmIsIdempotent(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	expected := []ExpectedCandidate{candidateOf(first.Deliveries["pub-fin"]), candidateOf(first.Deliveries["pub-ops"])}
+	deliveries, confirmed, err := ConfirmDeliveries(first.Deliveries, nil, true, expected, "run-c1", ProjectVersion(project))
+	if err != nil || len(confirmed) != 2 {
+		t.Fatalf("首次确认: %v %v", confirmed, err)
+	}
+	// 网络重试/双击导致的重复请求：同样的预期再次确认。
+	again, confirmed, err := ConfirmDeliveries(deliveries, nil, true, expected, "run-c2", ProjectVersion(project))
+	if err != nil || len(confirmed) != 2 {
+		t.Fatalf("重复确认应幂等成功: %v %v", confirmed, err)
+	}
+	for _, nodeID := range []string{"pub-fin", "pub-ops"} {
+		state := again[nodeID]
+		if state.Published == nil || state.Published.RunID != "run-1" {
+			t.Fatalf("%s 已发布版本不能被重复请求改变: %#v", nodeID, state)
+		}
+		publishedEvents := 0
+		for _, event := range state.History {
+			if event.Kind == EventPublished {
+				publishedEvents++
+			}
+		}
+		if publishedEvents != 1 {
+			t.Fatalf("%s 重复确认不能重复记录发布证据: %#v", nodeID, state.History)
+		}
+	}
+	// 没有预期绑定的重复请求仍然报错（不知道对方看过什么）。
+	if _, _, err := ConfirmDeliveries(again, nil, true, nil, "run-c3", ProjectVersion(project)); err == nil {
+		t.Fatal("没有待确认且没有预期绑定时必须报错")
 	}
 }

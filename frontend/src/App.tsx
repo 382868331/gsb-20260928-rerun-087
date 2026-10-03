@@ -187,11 +187,21 @@ export default function App() {
   async function confirm(body: { nodeIds?: string[]; all?: boolean }) {
     setConfirming(true);
     try {
-      const response = await api.confirm(project.id, body);
+      // 确认绑定本页面实际看过的候选版本与运行批次：
+      // 若另一窗口已重跑产生新候选，本次确认会被后端拒绝而不是误发布新结果。
+      const expected = Object.values(deliveries)
+        .filter((state) => state.pending && !state.pending.stale)
+        .map((state) => ({ nodeId: state.nodeId, version: state.pending!.version, runId: state.pending!.runId }));
+      const response = await api.confirm(project.id, { ...body, expected });
       setDeliveries(response.deliveries);
       setMessage(body.all ? "全部待确认结果已共同确认，对接收方可见。" : "该结果已先行确认，对接收方可见。");
     } catch (error) {
       setMessage("确认失败：" + (error instanceof Error ? error.message : "后端不可用") + "，待确认状态未变更。");
+      // 拒绝证据已持久化：刷新投递状态，展示失效/拒绝记录与其它窗口产生的新候选。
+      try {
+        const loaded = await api.loadProject(project.id);
+        if (loaded.deliveries) setDeliveries(loaded.deliveries);
+      } catch { /* 保留本地状态 */ }
     } finally {
       setConfirming(false);
     }

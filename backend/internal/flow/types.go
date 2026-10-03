@@ -126,7 +126,16 @@ const (
 	EventSuperseded  = "superseded"
 	EventPublished   = "published"
 	EventInvalidated = "invalidated"
+	EventRejected    = "rejected"
 )
+
+// ExpectedCandidate 是确认方实际看过的候选版本与运行批次：
+// 确认操作只对它生效，迟到的旧确认不能误发布更新后的候选。
+type ExpectedCandidate struct {
+	NodeID  string `json:"nodeId"`
+	Version string `json:"version"`
+	RunID   string `json:"runId"`
+}
 
 // DeliveryState 记录一个发布节点的当前投递状态：
 // Pending 仅已计算（对接收方不可见），Published 已对接收方可见。

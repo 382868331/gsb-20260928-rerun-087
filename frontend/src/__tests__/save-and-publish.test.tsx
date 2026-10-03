@@ -88,3 +88,48 @@ test("多接收方发布：运行后仅已计算，确认后对接收方可见",
   fireEvent.click(screen.getByText(/全部结果共同确认/));
   await waitFor(() => expect(screen.getAllByText("已对接收方可见").length).toBe(2));
 });
+
+test("双窗口：确认绑定看过的候选版本，旧页面迟到的确认不能误发布新结果", async () => {
+  // 窗口 A 看到的候选：v1 / run-1。
+  const seenDeliveries = {
+    "publish-1": { nodeId: "publish-1", receiver: "财务", pending: { nodeId: "publish-1", receiver: "财务", version: "v1", runId: "run-1", rows: 2, empty: false, summary: "s" }, history: [{ kind: "computed", version: "v1", runId: "run-1", note: "仅已计算" }] }
+  };
+  // 窗口 B 已重跑：服务端当前候选是 v2 / run-2，A 的确认被拒绝且证据持久化。
+  const freshDeliveries = {
+    "publish-1": { nodeId: "publish-1", receiver: "财务", pending: { nodeId: "publish-1", receiver: "财务", version: "v2", runId: "run-2", rows: 3, empty: false, summary: "s" }, history: [
+      { kind: "computed", version: "v1", runId: "run-1", note: "仅已计算" },
+      { kind: "superseded", version: "v1", runId: "run-2", note: "上游来源变化，旧待确认结果被取代" },
+      { kind: "computed", version: "v2", runId: "run-2", note: "本轮仅已计算" },
+      { kind: "rejected", version: "v2", runId: "run-c1", note: "迟到的旧确认被拒绝" }
+    ] }
+  };
+  let confirmBody: { expected?: { nodeId: string; version: string; runId: string }[] } = {};
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (url === "/api/components") return jsonResponse(components);
+    if (url === "/api/projects" && init?.method === "POST") {
+      const body = JSON.parse(String(init?.body));
+      return jsonResponse({ project: { ...body, revision: 1 }, validation: { ok: true, issues: [], executionOrder: [], affectedNodeIds: [] } });
+    }
+    if (url.endsWith("/run")) return jsonResponse({ ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries: seenDeliveries });
+    if (url.endsWith("/confirm")) {
+      confirmBody = JSON.parse(String(init?.body));
+      return jsonResponse({ error: "节点 publish-1 的候选已更新：迟到的旧确认被拒绝", deliveries: freshDeliveries }, 409);
+    }
+    if (url === "/api/projects/first-dataflow") return jsonResponse({ project: { format: "dataflow.project/v1", id: "first-dataflow", name: "p", revision: 1, nodes: [], edges: [] }, artifacts: {}, deliveries: freshDeliveries });
+    return jsonResponse({}, 404);
+  }));
+  render(<App />);
+  await screen.findByText("文件输入");
+  fireEvent.click(screen.getByText("整流程运行"));
+  await waitFor(() => expect(screen.getByText(/待确认（仅已计算）：版本 v1/)).toBeTruthy());
+
+  // 窗口 A 迟到确认：请求必须绑定它实际看过的 v1 / run-1。
+  fireEvent.click(screen.getByText("允许该结果先行确认"));
+  await waitFor(() => expect(screen.getByText(/确认失败：.*迟到的旧确认被拒绝/)).toBeTruthy());
+  expect(confirmBody.expected).toEqual([{ nodeId: "publish-1", version: "v1", runId: "run-1" }]);
+
+  // 新候选没有被误发布：刷新后仍是仅已计算，拒绝证据可见。
+  await waitFor(() => expect(screen.getByText(/待确认（仅已计算）：版本 v2/)).toBeTruthy());
+  expect(screen.queryByText("已对接收方可见")).toBeNull();
+  expect(screen.getByText(/投递证据（4 条/)).toBeTruthy();
+});

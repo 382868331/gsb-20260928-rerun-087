@@ -1,4 +1,4 @@
-import type { Artifact, ComponentDef, DeliveryState, Project, RunResult, SavedProjectResponse, Validation } from "./types";
+import type { Artifact, ComponentDef, DeliveryState, ExpectedCandidate, Project, RunResult, SavedProjectResponse, Validation } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...init });
@@ -16,5 +16,5 @@ export const api = {
   saveProject: (project: Project) => request<SavedProjectResponse | Validation>("/api/projects", { method: "POST", body: JSON.stringify(project) }),
   loadProject: (id: string) => request<{ project: Project; artifacts: Record<string, Artifact>; deliveries?: Record<string, DeliveryState> }>("/api/projects/" + id),
   run: (id: string, startNodeIds: string[]) => request<RunResult>("/api/projects/" + id + "/run", { method: "POST", body: JSON.stringify({ startNodeIds }) }),
-  confirm: (id: string, body: { nodeIds?: string[]; all?: boolean }) => request<{ confirmed: string[]; deliveries: Record<string, DeliveryState> }>("/api/projects/" + id + "/confirm", { method: "POST", body: JSON.stringify(body) })
+  confirm: (id: string, body: { nodeIds?: string[]; all?: boolean; expected?: ExpectedCandidate[] }) => request<{ confirmed: string[]; deliveries: Record<string, DeliveryState> }>("/api/projects/" + id + "/confirm", { method: "POST", body: JSON.stringify(body) })
 };

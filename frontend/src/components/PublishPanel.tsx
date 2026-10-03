@@ -54,7 +54,7 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
         {state.pending && !state.pending.stale && <button disabled={confirming} onClick={() => onConfirmOne(state.nodeId)}>允许该结果先行确认</button>}
         {state.history.length > 0 && <details className="evidence"><summary>投递证据（{state.history.length} 条，撤回修订不会删除）</summary>
           {state.history.map((event, index) => <div key={index} className="evidence-row">
-            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布", invalidated: "已失效" }[event.kind] ?? event.kind}</b>
+            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布", invalidated: "已失效", rejected: "确认被拒绝" }[event.kind] ?? event.kind}</b>
             <span>版本 {event.version} · {event.runId}</span>
             <em>{event.note}</em>
           </div>)}

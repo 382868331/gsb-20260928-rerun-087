@@ -1,13 +1,25 @@
-import type { DeliveryState, Project, RunResult } from "../types";
+import type { ConfirmTarget, Delivery, DeliveryEventKind, DeliveryState, Project, RunResult } from "../types";
 
 type Props = {
   project: Project;
   run?: RunResult;
   deliveries: Record<string, DeliveryState>;
   confirming: boolean;
-  onConfirmAll: () => void;
-  onConfirmOne: (nodeId: string) => void;
+  onConfirmAll: (targets: ConfirmTarget[]) => void;
+  onConfirmOne: (target: ConfirmTarget) => void;
 };
+
+const eventLabels: Record<DeliveryEventKind, string> = {
+  computed: "已计算",
+  superseded: "被取代",
+  published: "已发布",
+  invalidated: "已失效",
+  rejected: "拒绝确认"
+};
+
+function targetOf(delivery: Delivery): ConfirmTarget {
+  return { nodeId: delivery.nodeId, version: delivery.version, runId: delivery.runId };
+}
 
 function deliveryLabel(state: DeliveryState): string {
   if (state.pending?.stale && state.published) return "新候选已失效，接收方仍看到已发布版本";
@@ -27,13 +39,14 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
   const publishNodes = project.nodes.filter((node) => node.type === "publish");
   if (publishNodes.length === 0) return null;
   const states = publishNodes.map((node) => deliveries[node.id] ?? { nodeId: node.id, receiver: String(node.params.receiver ?? ""), history: [] });
-  const pendingCount = states.filter((state) => state.pending && !state.pending.stale).length;
+  const pendingStates = states.filter((state) => state.pending && !state.pending.stale);
+  const pendingCount = pendingStates.length;
   const failed = run && !run.ok;
   return <section className="publish-panel">
     <div className="panel-title">
       <h2>接收方发布核对</h2>
       <div className="publish-actions">
-        {pendingCount > 1 && <button className="primary" disabled={confirming} onClick={onConfirmAll}>全部结果共同确认（{pendingCount}）</button>}
+        {pendingCount > 1 && <button className="primary" disabled={confirming} onClick={() => onConfirmAll(pendingStates.map((state) => targetOf(state.pending!)))}>全部结果共同确认（{pendingCount}）</button>}
       </div>
     </div>
     {failed && <div className="banner danger">本轮有分支失败：下面标明每个接收方的结果仅已计算还是已经可见；已确认部分不会被重跑重复发布。</div>}
@@ -51,10 +64,17 @@ export function PublishPanel({ project, run, deliveries, confirming, onConfirmAl
         {state.pending?.stale && <p className="delivery-line stale-line">{describeDelivery("已失效候选（仅供查阅差异，不能确认）", state.pending)}</p>}
         {state.pending?.stale && <div className="banner danger">确认被拒绝：{state.pending.staleReason || "候选失去依据"}。需重新运行产生新候选。</div>}
         {!state.published && !state.pending && <p className="muted">该接收方还没有任何投递记录。</p>}
-        {state.pending && !state.pending.stale && <button disabled={confirming} onClick={() => onConfirmOne(state.nodeId)}>允许该结果先行确认</button>}
+        {state.pending && !state.pending.stale && <button disabled={confirming} onClick={() => onConfirmOne(targetOf(state.pending))}>允许该结果先行确认</button>}
+        {(state.invalidated?.length ?? 0) > 0 && <details className="evidence"><summary>已拒绝/失效候选（{state.invalidated!.length} 个，仅供比较，恢复原文不能复活）</summary>
+          {state.invalidated!.map((delivery) => <div key={delivery.version + delivery.runId} className="evidence-row">
+            <b>已失效候选</b>
+            <span>{describeDelivery("版本", delivery)}</span>
+            <em>{delivery.staleReason || "候选失去依据"}</em>
+          </div>)}
+        </details>}
         {state.history.length > 0 && <details className="evidence"><summary>投递证据（{state.history.length} 条，撤回修订不会删除）</summary>
           {state.history.map((event, index) => <div key={index} className="evidence-row">
-            <b>{{ computed: "已计算", superseded: "被取代", published: "已发布", invalidated: "已失效" }[event.kind] ?? event.kind}</b>
+            <b>{eventLabels[event.kind] ?? event.kind}</b>
             <span>版本 {event.version} · {event.runId}</span>
             <em>{event.note}</em>
           </div>)}

@@ -77,7 +77,16 @@ test("多接收方发布：运行后仅已计算，确认后对接收方可见",
       return jsonResponse({ project: { ...body, revision: 1 }, validation: { ok: true, issues: [], executionOrder: [], affectedNodeIds: [] } });
     }
     if (url.endsWith("/run")) return jsonResponse({ ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries });
-    if (url.endsWith("/confirm")) return jsonResponse({ confirmed: ["publish-1", "publish-2"], deliveries: confirmedDeliveries });
+    if (url.endsWith("/confirm")) {
+      const confirmBody = JSON.parse(String(init?.body));
+      // 共同确认必须携带页面实际看到的候选版本与运行批次。
+      expect(confirmBody.all).toBe(true);
+      expect(confirmBody.targets).toEqual([
+        { nodeId: "publish-1", version: "v1", runId: "run-1" },
+        { nodeId: "publish-2", version: "v2", runId: "run-1" }
+      ]);
+      return jsonResponse({ confirmed: ["publish-1", "publish-2"], deliveries: confirmedDeliveries });
+    }
     return jsonResponse({}, 404);
   }));
   render(<App />);

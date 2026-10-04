@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Background, Controls, ReactFlow, addEdge, useEdgesState, useNodesState, type Edge, type Node } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { blankProject, createNode, downstreamIds, emptyProject, normalizeProject, toReactEdge } from "./project";
 import { DataPanel } from "./components/DataPanel";
 import { Inspector } from "./components/Inspector";
 import { PublishPanel } from "./components/PublishPanel";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { ComponentDef, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
+import type { ComponentDef, ConfirmTarget, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
 
@@ -184,14 +184,15 @@ export default function App() {
     setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
   }
 
-  async function confirm(body: { nodeIds?: string[]; all?: boolean }) {
+  async function confirm(body: { targets?: ConfirmTarget[]; all?: boolean }, successMessage: string) {
     setConfirming(true);
     try {
       const response = await api.confirm(project.id, body);
       setDeliveries(response.deliveries);
-      setMessage(body.all ? "全部待确认结果已共同确认，对接收方可见。" : "该结果已先行确认，对接收方可见。");
+      setMessage(successMessage);
     } catch (error) {
-      setMessage("确认失败：" + (error instanceof Error ? error.message : "后端不可用") + "，待确认状态未变更。");
+      if (error instanceof ApiError && error.deliveries) setDeliveries(error.deliveries);
+      setMessage("确认被拒绝：" + (error instanceof Error ? error.message : "后端不可用") + "；失效候选仅留作比较，需重新运行产生新候选。");
     } finally {
       setConfirming(false);
     }
@@ -230,7 +231,7 @@ export default function App() {
     </main>
     <div className="bottom-panels">
       <DataPanel project={project} selectedId={selectedId} run={run} />
-      <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={() => confirm({ all: true })} onConfirmOne={(nodeId) => confirm({ nodeIds: [nodeId] })} />
+      <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={(targets) => confirm({ all: true, targets }, "全部结果共同确认成功，对接收方可见。")} onConfirmOne={(target) => confirm({ targets: [target] }, "该结果已先行确认，对接收方可见。")} />
     </div>
   </div>;
 }

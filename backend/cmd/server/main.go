@@ -147,6 +147,11 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		project = normalizeProject(project)
 		if existing, ok := store.projects[project.ID]; ok {
 			project.Revision = existing.Revision + 1
+			// 工程内容变化（即使只是把来源改回原文）立即持久化失效所有遗留候选：
+			// 失效不只存在于一次确认请求的现场判断，保存重开后旧候选依然不可发布。
+			if flow.ProjectVersion(existing) != flow.ProjectVersion(project) {
+				store.deliveries[project.ID] = flow.InvalidatePendingForProject(store.deliveries[project.ID], flow.ProjectVersion(project))
+			}
 		} else {
 			project.Revision = 1
 		}
@@ -215,8 +220,9 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 	mux.HandleFunc("POST /api/projects/{id}/confirm", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
 		var body struct {
-			NodeIDs []string `json:"nodeIds"`
-			All     bool     `json:"all"`
+			NodeIDs []string             `json:"nodeIds"`
+			Targets []flow.ConfirmTarget `json:"targets"`
+			All     bool                 `json:"all"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			writeError(w, http.StatusBadRequest, "确认请求 JSON 无效")
@@ -232,14 +238,23 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		if store.deliveries[id] == nil {
 			store.deliveries[id] = map[string]flow.DeliveryState{}
 		}
-		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, newRunID(), flow.ProjectVersion(project))
-		if err != nil {
-			writeError(w, http.StatusConflict, err.Error())
+		// 兼容旧调用方：只有 nodeIds 时按未绑定批次处理（仅旧测试/旧页面会走到）。
+		targets := body.Targets
+		if len(targets) == 0 {
+			for _, nodeID := range body.NodeIDs {
+				targets = append(targets, flow.ConfirmTarget{NodeID: nodeID})
+			}
+		}
+		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], targets, body.All, newRunID(), flow.ProjectVersion(project))
+		// 即使被拒绝（409），失效标记与 rejected 证据也要持久化并回传，
+		// 供双窗口中另一个页面刷新后看到最新状态。
+		store.deliveries[id] = updated
+		if saveErr := store.saveLocked(); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
 			return
 		}
-		store.deliveries[id] = updated
-		if err := store.saveLocked(); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "deliveries": updated})
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated})

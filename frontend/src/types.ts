@@ -85,11 +85,14 @@ export type Delivery = {
   stale?: boolean;
   staleReason?: string;
 };
-export type DeliveryEvent = { kind: "computed" | "superseded" | "published" | "invalidated"; version: string; runId: string; note: string };
+export type DeliveryEventKind = "computed" | "superseded" | "published" | "invalidated" | "rejected";
+export type DeliveryEvent = { kind: DeliveryEventKind; version: string; runId: string; note: string };
 export type DeliveryState = {
   nodeId: string;
   receiver: string;
   pending?: Delivery;
   published?: Delivery;
+  invalidated?: Delivery[];
   history: DeliveryEvent[];
 };
+export type ConfirmTarget = { nodeId: string; version?: string; runId?: string };

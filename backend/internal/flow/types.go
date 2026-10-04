@@ -126,6 +126,7 @@ const (
 	EventSuperseded  = "superseded"
 	EventPublished   = "published"
 	EventInvalidated = "invalidated"
+	EventRejected    = "rejected"
 )
 
 // DeliveryState 记录一个发布节点的当前投递状态：
@@ -135,7 +136,19 @@ type DeliveryState struct {
 	Receiver  string          `json:"receiver"`
 	Pending   *Delivery       `json:"pending,omitempty"`
 	Published *Delivery       `json:"published,omitempty"`
+	// Invalidated 保留所有已被拒绝/失效的历史候选，仅供查阅比较，
+	// 来源恢复原文也不能让它们复活（追加式，重跑不会清空）。
+	Invalidated []Delivery      `json:"invalidated,omitempty"`
 	History   []DeliveryEvent `json:"history"`
+}
+
+// ConfirmTarget 把一次确认绑定到用户实际看过的候选版本与运行批次：
+// 页面上展示的是哪个 (Version, RunID)，确认请求就必须携带哪一个，
+// 旧页面迟到的确认无法发布之后重算出的新候选。
+type ConfirmTarget struct {
+	NodeID  string `json:"nodeId"`
+	Version string `json:"version,omitempty"`
+	RunID   string `json:"runId,omitempty"`
 }
 
 const (

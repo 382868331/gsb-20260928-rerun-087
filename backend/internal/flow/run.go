@@ -155,10 +155,42 @@ func invalidatePendingDelivery(deliveries map[string]DeliveryState, nodeID strin
 	pending := *state.Pending
 	pending.Stale = true
 	pending.StaleReason = reason
+	state.Invalidated = appendInvalidated(state.Invalidated, pending)
 	state.Pending = &pending
 	state.History = append(state.History, DeliveryEvent{Kind: EventInvalidated, Version: pending.Version, RunID: pending.RunID, Note: reason + "，候选已失效，需重新运行产生新候选"})
 	deliveries[nodeID] = state
 	return deliveries
+}
+
+// appendInvalidated 把失效候选追加到留证列表（同版本不重复登记）。
+func appendInvalidated(list []Delivery, delivery Delivery) []Delivery {
+	for _, existing := range list {
+		if existing.NodeID == delivery.NodeID && existing.Version == delivery.Version && existing.RunID == delivery.RunID {
+			return list
+		}
+	}
+	return append(list, delivery)
+}
+
+// InvalidatePendingForProject 在工程内容（来源或流程修订）发生变化且尚未重跑时，
+// 立即把全部遗留待确认候选持久化标记为失效。失效状态不依赖某一次确认请求的现场判断：
+// 即使之后把来源改回原文、或不重跑直接确认，旧候选也永远不能复活发布。
+func InvalidatePendingForProject(deliveries map[string]DeliveryState, projectVersion string) map[string]DeliveryState {
+	if deliveries == nil || projectVersion == "" {
+		return deliveries
+	}
+	updated := deliveries
+	for nodeID, state := range deliveries {
+		if state.Pending == nil || state.Pending.Stale {
+			continue
+		}
+		if state.Pending.ProjectVersion != "" && state.Pending.ProjectVersion == projectVersion {
+			continue
+		}
+		reason := "候选计算后工程（来源或流程）已被修改，失去流程修订依据"
+		updated = invalidatePendingDelivery(updated, nodeID, reason)
+	}
+	return updated
 }
 
 // recordComputedDelivery 把本轮发布节点的计算结果登记为“仅已计算”的待确认投递：
@@ -213,61 +245,175 @@ func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, arti
 	}
 }
 
-// ConfirmDeliveries 把待确认投递标记为对接收方可见；all 为 true 时要求全部待确认一起确认，
-// 否则只允许明确指定的节点部分先行。已发布记录与证据日志保留。
-// 确认前逐项核对候选依据：已失效（来源运行失败）或流程修订已变化的候选必须拒绝。
-func ConfirmDeliveries(deliveries map[string]DeliveryState, nodeIDs []string, all bool, runID string, projectVersion string) (map[string]DeliveryState, []string, error) {
-	targets := map[string]bool{}
+// ConfirmDeliveries 把待确认投递标记为对接收方可见。
+//
+// 确认请求必须绑定用户实际看过的候选（版本, 运行批次）：targets 携带页面展示的
+// Version/RunID，旧页面迟到的确认命中新候选时会被拒绝，不会误发布新结果。
+// 共同确认（all）要求覆盖当前所有待确认候选且批次逐一匹配，任一分支失效或批次
+// 不一致时整组拒绝（原子语义，绝不部分发布其他分支）；非 all 时允许单个结果先行。
+//
+// 被拒绝的候选会被持久化标记失效并追加 rejected 证据（即使返回错误，状态变更也随
+// 返回的 map 落盘）：来源恢复原文而不重跑不能恢复其发布资格。重复确认已发布的相同
+// 版本是幂等的，直接返回成功而不重复发布。
+func ConfirmDeliveries(deliveries map[string]DeliveryState, targets []ConfirmTarget, all bool, confirmID string, projectVersion string) (map[string]DeliveryState, []string, error) {
+	updated := deliveries
+	if updated == nil {
+		updated = map[string]DeliveryState{}
+	}
+	requested := map[string]ConfirmTarget{}
+	for _, target := range targets {
+		requested[target.NodeID] = target
+	}
 	if all {
-		for nodeID, state := range deliveries {
-			if state.Pending != nil && rejectReason(state.Pending, projectVersion) == "" {
-				targets[nodeID] = true
+		pendingCount := 0
+		for _, state := range updated {
+			if state.Pending != nil {
+				pendingCount++
 			}
 		}
-		if len(targets) == 0 {
-			for _, state := range deliveries {
-				if state.Pending != nil {
-					return deliveries, nil, fmt.Errorf("没有可确认的待发布结果：节点 %s 的候选已失效（%s），需重新运行产生新候选", state.NodeID, rejectReason(state.Pending, projectVersion))
+		if pendingCount == 0 {
+			return updated, nil, fmt.Errorf("没有待确认的发布结果")
+		}
+		if len(requested) == 0 {
+			return updated, nil, fmt.Errorf("共同确认必须绑定当前全部待确认候选的版本与运行批次")
+		}
+		for nodeID, state := range updated {
+			if state.Pending != nil {
+				if _, exists := requested[nodeID]; !exists {
+					return updated, nil, fmt.Errorf("节点 %s 存在共同确认未覆盖的待确认候选，拒绝部分发布", nodeID)
 				}
 			}
-			return deliveries, nil, fmt.Errorf("没有待确认的发布结果")
-		}
-	} else {
-		for _, nodeID := range nodeIDs {
-			targets[nodeID] = true
 		}
 	}
-	confirmed := make([]string, 0, len(targets))
-	for nodeID := range targets {
-		state, exists := deliveries[nodeID]
-		if !exists || state.Pending == nil {
-			return deliveries, nil, fmt.Errorf("节点 %s 没有待确认的发布结果", nodeID)
+	nodeIDs := make([]string, 0, len(requested))
+	for nodeID := range requested {
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+	sort.Strings(nodeIDs)
+	var failures []string
+	for _, nodeID := range nodeIDs {
+		state, exists := updated[nodeID]
+		target := requested[nodeID]
+		if !exists {
+			failures = append(failures, fmt.Sprintf("节点 %s 没有投递记录", nodeID))
+			continue
+		}
+		if state.Pending == nil {
+			if state.Published != nil && (target.Version == "" || state.Published.Version == target.Version) && (target.RunID == "" || state.Published.RunID == target.RunID) {
+				continue // 幂等：相同版本已对接收方可见，重复请求不重复发布。
+			}
+			if state.Published != nil {
+				reason := fmt.Sprintf("确认的是旧批次（版本 %s / %s），当前对接收方可见的是版本 %s / %s；旧页面迟到的确认不能发布新结果", displayVersion(target.Version), displayRun(target.RunID), state.Published.Version, state.Published.RunID)
+				updated = recordRejection(updated, nodeID, target, reason)
+				failures = append(failures, fmt.Sprintf("节点 %s：%s", nodeID, reason))
+				continue
+			}
+			if last := lastInvalidated(state); last != nil {
+				reason := "该候选已被拒绝（" + staleReasonOf(last) + "），恢复原内容不能恢复发布资格，需重新运行"
+				failures = append(failures, fmt.Sprintf("节点 %s：%s", nodeID, reason))
+				continue
+			}
+			failures = append(failures, fmt.Sprintf("节点 %s 没有待确认的发布结果", nodeID))
+			continue
 		}
 		if reason := rejectReason(state.Pending, projectVersion); reason != "" {
-			return deliveries, nil, fmt.Errorf("节点 %s 的待确认结果已失效，拒绝确认：%s", nodeID, reason)
+			updated = recordRejection(updated, nodeID, target, reason)
+			failures = append(failures, fmt.Sprintf("节点 %s 的待确认结果已失效，拒绝确认：%s", nodeID, reason))
+			continue
+		}
+		if target.Version != "" && target.Version != state.Pending.Version {
+			reason := fmt.Sprintf("确认请求绑定的是旧版本 %s，当前待确认版本为 %s（用户看到的候选已被重新计算取代），旧页面迟到的确认拒绝发布", target.Version, state.Pending.Version)
+			updated = recordRejection(updated, nodeID, target, reason)
+			failures = append(failures, fmt.Sprintf("节点 %s：%s", nodeID, reason))
+			continue
+		}
+		if target.RunID != "" && target.RunID != state.Pending.RunID {
+			reason := fmt.Sprintf("确认请求绑定的是旧运行批次 %s，当前候选来自批次 %s，拒绝用旧确认发布新结果", target.RunID, state.Pending.RunID)
+			updated = recordRejection(updated, nodeID, target, reason)
+			failures = append(failures, fmt.Sprintf("节点 %s：%s", nodeID, reason))
+			continue
 		}
 	}
-	for nodeID := range targets {
-		state := deliveries[nodeID]
+	if len(failures) > 0 {
+		return updated, nil, errors.New(strings.Join(failures, "；")) // 原子语义：任一目标被拒，整组不发布。
+	}
+	confirmed := make([]string, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		state := updated[nodeID]
+		if state.Pending == nil {
+			continue // 幂等命中已发布版本。
+		}
 		published := *state.Pending
 		state.Published = &published
 		state.Pending = nil
-		state.History = append(state.History, DeliveryEvent{Kind: EventPublished, Version: published.Version, RunID: runID, Note: "已确认，结果对接收方可见"})
-		deliveries[nodeID] = state
+		state.History = append(state.History, DeliveryEvent{Kind: EventPublished, Version: published.Version, RunID: confirmID, Note: fmt.Sprintf("已确认（候选来自 %s，版本 %s），结果对接收方可见", published.RunID, published.Version)})
+		updated[nodeID] = state
 		confirmed = append(confirmed, nodeID)
 	}
-	sort.Strings(confirmed)
-	return deliveries, confirmed, nil
+	return updated, confirmed, nil
+}
+
+func displayVersion(version string) string {
+	if version == "" {
+		return "未知版本"
+	}
+	return version
+}
+
+func displayRun(runID string) string {
+	if runID == "" {
+		return "未知批次"
+	}
+	return runID
+}
+
+// recordRejection 把一次拒绝确认持久化：待确认候选标记失效并转入留证列表，
+// 历史追加 rejected 事件。之后即使来源恢复原文且不重跑，也不能再确认它。
+func recordRejection(deliveries map[string]DeliveryState, nodeID string, target ConfirmTarget, reason string) map[string]DeliveryState {
+	state := deliveries[nodeID]
+	targetVersion := target.Version
+	targetRunID := target.RunID
+	if state.Pending != nil {
+		matchesBatch := (target.Version == "" || target.Version == state.Pending.Version) && (target.RunID == "" || target.RunID == state.Pending.RunID)
+		if matchesBatch && !state.Pending.Stale {
+			pending := *state.Pending
+			pending.Stale = true
+			pending.StaleReason = reason
+			state.Invalidated = appendInvalidated(state.Invalidated, pending)
+			state.Pending = &pending
+		} else if !matchesBatch {
+			// 旧页面迟到的确认针对的是已被取代的旧候选：当前新候选保持有效，
+			// 只登记拒绝证据，不能误伤新版本。
+			targetVersion = target.Version
+			targetRunID = target.RunID
+		} else {
+			targetVersion = state.Pending.Version
+			targetRunID = state.Pending.RunID
+		}
+	}
+	state.History = append(state.History, DeliveryEvent{Kind: EventRejected, Version: targetVersion, RunID: targetRunID, Note: "确认被拒绝：" + reason})
+	deliveries[nodeID] = state
+	return deliveries
+}
+
+func lastInvalidated(state DeliveryState) *Delivery {
+	if len(state.Invalidated) == 0 {
+		return nil
+	}
+	return &state.Invalidated[len(state.Invalidated)-1]
+}
+
+func staleReasonOf(delivery *Delivery) string {
+	if delivery.StaleReason != "" {
+		return delivery.StaleReason
+	}
+	return "来源运行失败或流程修订变化，候选失去依据"
 }
 
 // rejectReason 返回候选不可确认的原因（失去了哪项依据）；可确认时返回空串。
 func rejectReason(pending *Delivery, projectVersion string) string {
 	if pending.Stale {
-		reason := pending.StaleReason
-		if reason == "" {
-			reason = "来源运行失败，候选失去运行依据"
-		}
-		return reason
+		return staleReasonOf(pending)
 	}
 	if projectVersion != "" && pending.ProjectVersion != "" && pending.ProjectVersion != projectVersion {
 		return "候选计算后工程（来源或流程）已被修改，失去流程修订依据，需重新运行产生新候选"

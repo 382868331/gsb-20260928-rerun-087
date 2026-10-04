@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -172,6 +173,7 @@ func TestRunConfirmAndReloadDeliveries(t *testing.T) {
 	if !run.OK || run.Deliveries["pub"].Pending == nil {
 		t.Fatalf("run should compute a pending delivery: %#v", run)
 	}
+	pending := run.Deliveries["pub"].Pending
 
 	// 确认途中重新打开：接收方视角应与确认前一致（仍不可见）。
 	request = httptest.NewRequest(http.MethodGet, "/api/projects/pub-http", nil)
@@ -185,7 +187,8 @@ func TestRunConfirmAndReloadDeliveries(t *testing.T) {
 		t.Fatalf("确认途中重开应看到仅已计算状态: %#v", reopened.Deliveries["pub"])
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "/api/projects/pub-http/confirm", bytes.NewBufferString(`{"all":true}`))
+	confirmBody := fmt.Sprintf(`{"all":true,"targets":[{"nodeId":"pub","version":%q,"runId":%q}]}`, pending.Version, pending.RunID)
+	request = httptest.NewRequest(http.MethodPost, "/api/projects/pub-http/confirm", bytes.NewBufferString(confirmBody))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {

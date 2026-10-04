@@ -4,6 +4,7 @@ import "@xyflow/react/dist/style.css";
 import { api } from "./api";
 import { blankProject, createNode, downstreamIds, emptyProject, normalizeProject, toReactEdge } from "./project";
 import { DataPanel } from "./components/DataPanel";
+import { ComparePanel } from "./components/ComparePanel";
 import { Inspector } from "./components/Inspector";
 import { PublishPanel } from "./components/PublishPanel";
 import { StepNode, type StepNodeData } from "./components/StepNode";
@@ -241,6 +242,7 @@ export default function App() {
     <div className="bottom-panels">
       <DataPanel project={project} selectedId={selectedId} run={run} />
       <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={() => confirm({ all: true })} onConfirmOne={(nodeId) => confirm({ nodeIds: [nodeId] })} />
+      <ComparePanel projectId={project.id} refreshKey={(run?.runId ?? "") + "|" + JSON.stringify(deliveries).length} />
     </div>
   </div>;
 }

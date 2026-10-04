@@ -1,4 +1,4 @@
-import type { Artifact, ComponentDef, DeliveryState, ExpectedCandidate, Project, RunResult, SavedProjectResponse, Validation } from "./types";
+import type { Artifact, CandidateFilter, CandidateView, CompareView, Comparison, ComponentDef, DeliveryState, ExpectedCandidate, Project, RunResult, SavedProjectResponse, Validation } from "./types";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { headers: { "Content-Type": "application/json" }, ...init });
@@ -17,4 +17,19 @@ export const api = {
   loadProject: (id: string) => request<{ project: Project; artifacts: Record<string, Artifact>; deliveries?: Record<string, DeliveryState> }>("/api/projects/" + id),
   run: (id: string, startNodeIds: string[]) => request<RunResult>("/api/projects/" + id + "/run", { method: "POST", body: JSON.stringify({ startNodeIds }) }),
   confirm: (id: string, body: { nodeIds?: string[]; all?: boolean; expected?: ExpectedCandidate[] }) => request<{ confirmed: string[]; deliveries: Record<string, DeliveryState> }>("/api/projects/" + id + "/confirm", { method: "POST", body: JSON.stringify(body) })
+  ,
+  candidates: (id: string, filter: CandidateFilter) => {
+    const params = new URLSearchParams();
+    if (filter.receiver) params.set("receiver", filter.receiver);
+    if (filter.projectVersion) params.set("projectVersion", filter.projectVersion);
+    if (filter.runFrom) params.set("runFrom", filter.runFrom);
+    if (filter.runTo) params.set("runTo", filter.runTo);
+    if (filter.status) params.set("status", filter.status);
+    const query = params.toString();
+    return request<{ candidates: CandidateView[] }>("/api/projects/" + id + "/candidates" + (query ? "?" + query : ""));
+  },
+  compare: (id: string, a: string, b: string) => request<Comparison>("/api/projects/" + id + "/compare", { method: "POST", body: JSON.stringify({ a, b }) }),
+  compareViews: (id: string) => request<{ views: CompareView[] }>("/api/projects/" + id + "/compare-views"),
+  saveCompareView: (id: string, view: CompareView) => request<{ views: CompareView[] }>("/api/projects/" + id + "/compare-views", { method: "POST", body: JSON.stringify(view) }),
+  deleteCompareView: (id: string, name: string) => request<{ views: CompareView[] }>("/api/projects/" + id + "/compare-views/" + encodeURIComponent(name), { method: "DELETE" })
 };

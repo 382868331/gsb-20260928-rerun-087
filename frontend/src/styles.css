@@ -41,7 +41,7 @@ main { min-height: 0; display: grid; grid-template-columns: 190px 1fr 340px; }
 .danger { background: #fee2e2; color: #991b1b; }
 .ports { display: grid; gap: 6px; font-size: 12px; }
 .data-panel { background: white; border-top: 1px solid #dde5ef; padding: 12px 16px; overflow: auto; }
-.bottom-panels { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; border-top: 1px solid #dde5ef; }
+.bottom-panels { display: grid; grid-template-columns: 1fr 1fr 1.2fr; min-height: 0; border-top: 1px solid #dde5ef; }
 .bottom-panels .data-panel { border-top: 0; }
 .publish-panel { background: white; border-left: 1px solid #dde5ef; padding: 12px 16px; overflow: auto; }
 .publish-panel h2 { font-size: 16px; margin: 0; }
@@ -71,6 +71,22 @@ th { background: #f8fafc; }
 .reuse-report { margin-top: 10px; border-top: 1px dashed #e2e8f0; padding-top: 8px; font-size: 12px; display: grid; gap: 4px; }
 .reuse-row { display: grid; grid-template-columns: 1fr 52px 2fr; gap: 8px; align-items: baseline; }
 .reuse-row b { font-size: 11px; }
+.compare-panel { background: white; border-left: 1px solid #dde5ef; padding: 12px 16px; overflow: auto; }
+.compare-panel h2 { font-size: 16px; margin: 0; }
+.compare-filters, .compare-views, .compare-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.compare-filters select, .compare-filters input, .compare-views select, .compare-views input { flex: 1; min-width: 90px; padding: 5px 7px; border: 1px solid #cbd5e1; border-radius: 7px; font-size: 12px; }
+.compare-views button, .compare-actions button { font-size: 12px; padding: 5px 10px; }
+.diff-only { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #475569; }
+.candidate-table { max-height: 130px; margin-top: 8px; }
+.candidate-table tr.selected td { background: #eff6ff; }
+.compare-panel .banner { margin-top: 8px; }
+.comparison-result { margin-top: 8px; display: grid; gap: 8px; font-size: 12px; }
+.basis-diff td { background: #fef3c7; }
+.diff-block b { display: block; margin-bottom: 4px; }
+.diff-block pre { margin: 2px 0; padding: 4px 6px; border-radius: 6px; font-size: 11px; white-space: pre-wrap; }
+.diff-block.added pre { background: #dcfce7; }
+.diff-block.removed pre { background: #fee2e2; }
+.diff-block.changed table { border: 1px solid #e2e8f0; }
 .reuse-row.reused b { color: #166534; }
 .reuse-row.succeeded b { color: #1d4ed8; }
 .reuse-row.failed b, .reuse-row.blocked b { color: #b91c1c; }

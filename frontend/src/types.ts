@@ -94,3 +94,35 @@ export type DeliveryState = {
   published?: Delivery;
   history: DeliveryEvent[];
 };
+export type CandidateFilter = {
+  receiver?: string;
+  projectVersion?: string;
+  runFrom?: string;
+  runTo?: string;
+  status?: string;
+};
+export type CandidateView = {
+  key: string;
+  nodeId: string;
+  receiver: string;
+  version: string;
+  runId: string;
+  projectVersion: string;
+  status: "pending" | "published" | "stale" | "superseded";
+  rows: number;
+  empty: boolean;
+  summary: string;
+};
+export type CompareView = { name: string; filter: CandidateFilter; diffOnly: boolean };
+export type FieldChange = { field: string; a: unknown; b: unknown };
+export type RowChange = { rowKey: string; fields: FieldChange[] };
+export type BasisDiff = { field: string; a: string; b: string };
+export type Comparison = {
+  a: CandidateView;
+  b: CandidateView;
+  added: Record<string, unknown>[];
+  removed: Record<string, unknown>[];
+  changes: RowChange[];
+  identical: boolean;
+  basisDiffs: BasisDiff[];
+};

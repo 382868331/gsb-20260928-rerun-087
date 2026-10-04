@@ -56,6 +56,9 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	for nodeID, state := range deliveries {
 		updatedDeliveries[nodeID] = state
 	}
+	// 本轮新产生的发布候选：归档供跨运行对比，键含运行批次，
+	// 输出相同但依据不同的候选各自独立登记。
+	newCandidates := make([]Candidate, 0)
 
 	ok := true
 	for _, nodeID := range validation.ExecutionOrder {
@@ -112,6 +115,10 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			var deliveryNote string
 			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID, projectVersion)
 			reason = reason + "；" + deliveryNote
+			candidateMap := RecordCandidate(nil, node, artifact, runID, projectVersion)
+			for _, candidate := range candidateMap {
+				newCandidates = append(newCandidates, candidate)
+			}
 		}
 		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
 	}
@@ -135,7 +142,8 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		affectedList = append(affectedList, nodeID)
 	}
 	sort.Strings(affectedList)
-	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries}
+	sort.Slice(newCandidates, func(i, j int) bool { return newCandidates[i].Key < newCandidates[j].Key })
+	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries, Candidates: newCandidates}
 }
 
 func statusLabel(status string) string {

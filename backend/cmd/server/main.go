@@ -20,16 +20,20 @@ type store struct {
 	projects   map[string]flow.Project
 	artifacts  map[string]map[string]flow.Artifact
 	deliveries map[string]map[string]flow.DeliveryState
+	candidates map[string]map[string]flow.Candidate
+	views      map[string][]flow.CompareView
 }
 
 type savedEnvelope struct {
 	Projects   map[string]flow.Project                  `json:"projects"`
 	Artifacts  map[string]map[string]flow.Artifact      `json:"artifacts"`
 	Deliveries map[string]map[string]flow.DeliveryState `json:"deliveries"`
+	Candidates map[string]map[string]flow.Candidate     `json:"candidates"`
+	Views      map[string][]flow.CompareView            `json:"views"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, candidates: map[string]map[string]flow.Candidate{}, views: map[string][]flow.CompareView{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -50,6 +54,12 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.Deliveries != nil {
 		s.deliveries = envelope.Deliveries
 	}
+	if envelope.Candidates != nil {
+		s.candidates = envelope.Candidates
+	}
+	if envelope.Views != nil {
+		s.views = envelope.Views
+	}
 	// 磁盘上的旧数据可能把空节点/连接集合存成 null，重新打开时统一归一化为 []，
 	// 避免前端拿到未定义的节点集合后整页崩溃。
 	for id, project := range s.projects {
@@ -62,7 +72,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, Candidates: s.candidates, Views: s.views}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -211,6 +221,18 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		if result.Deliveries != nil {
 			store.deliveries[id] = result.Deliveries
 		}
+		// 归档本轮新产生的发布候选（跨运行对比用）：追加式持久化，
+		// 输出相同但依据不同的候选各自独立登记，互不合并。
+		if len(result.Candidates) > 0 {
+			if store.candidates[id] == nil {
+				store.candidates[id] = map[string]flow.Candidate{}
+			}
+			for _, candidate := range result.Candidates {
+				if _, exists := store.candidates[id][candidate.Key]; !exists {
+					store.candidates[id][candidate.Key] = candidate
+				}
+			}
+		}
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -255,6 +277,105 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated})
+	})
+	// 跨运行候选对比：筛选、并排对比与筛选视图保存都是只读操作——
+	// 不改变接收方当前可见版本，也不恢复已失效候选的发布资格。
+	mux.HandleFunc("GET /api/projects/{id}/candidates", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		query := request.URL.Query()
+		filter := flow.CandidateFilter{
+			Receiver:       query.Get("receiver"),
+			ProjectVersion: query.Get("projectVersion"),
+			RunFrom:        query.Get("runFrom"),
+			RunTo:          query.Get("runTo"),
+			Status:         query.Get("status"),
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"candidates": flow.ListCandidates(store.candidates[id], store.deliveries[id], filter)})
+	})
+	mux.HandleFunc("POST /api/projects/{id}/compare", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var body struct {
+			A string `json:"a"`
+			B string `json:"b"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "对比请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		a, okA := store.candidates[id][body.A]
+		b, okB := store.candidates[id][body.B]
+		if !okA || !okB {
+			writeError(w, http.StatusNotFound, "候选不存在或已被清理")
+			return
+		}
+		writeJSON(w, http.StatusOK, flow.CompareCandidates(a, b, store.deliveries[id]))
+	})
+	mux.HandleFunc("GET /api/projects/{id}/compare-views", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		views := store.views[id]
+		if views == nil {
+			views = []flow.CompareView{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"views": views})
+	})
+	mux.HandleFunc("POST /api/projects/{id}/compare-views", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var view flow.CompareView
+		if err := json.NewDecoder(request.Body).Decode(&view); err != nil {
+			writeError(w, http.StatusBadRequest, "视图 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		updated, err := flow.SaveCompareView(store.views[id], view)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		store.views[id] = updated
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"views": updated})
+	})
+	mux.HandleFunc("DELETE /api/projects/{id}/compare-views/{name}", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		name := request.PathValue("name")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		store.views[id] = flow.DeleteCompareView(store.views[id], name)
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"views": store.views[id]})
 	})
 	if staticDir != "" {
 		mux.Handle("GET /", spaHandler(staticDir))

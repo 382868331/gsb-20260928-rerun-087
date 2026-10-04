@@ -163,5 +163,7 @@ type RunResult struct {
 	AffectedNodeIDs []string                 `json:"affectedNodeIds"`
 	Results         map[string]NodeResult    `json:"results"`
 	Deliveries      map[string]DeliveryState `json:"deliveries,omitempty"`
-	Issues          []Issue                  `json:"issues,omitempty"`
+	// Candidates 是本轮新归档的发布候选（跨运行对比用），由服务端合并进持久化档案。
+	Candidates []Candidate `json:"candidates,omitempty"`
+	Issues     []Issue     `json:"issues,omitempty"`
 }

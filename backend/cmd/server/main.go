@@ -14,22 +14,26 @@ import (
 )
 
 type store struct {
-	mu         sync.Mutex
-	file       string
-	outputDir  string
-	projects   map[string]flow.Project
-	artifacts  map[string]map[string]flow.Artifact
-	deliveries map[string]map[string]flow.DeliveryState
+	mu                 sync.Mutex
+	file               string
+	outputDir          string
+	projects           map[string]flow.Project
+	artifacts          map[string]map[string]flow.Artifact
+	deliveries         map[string]map[string]flow.DeliveryState
+	candidateArchives  map[string]map[string]flow.CandidateArchive
+	comparisonSettings map[string]flow.CandidateComparisonState
 }
 
 type savedEnvelope struct {
-	Projects   map[string]flow.Project                  `json:"projects"`
-	Artifacts  map[string]map[string]flow.Artifact      `json:"artifacts"`
-	Deliveries map[string]map[string]flow.DeliveryState `json:"deliveries"`
+	Projects           map[string]flow.Project                     `json:"projects"`
+	Artifacts          map[string]map[string]flow.Artifact         `json:"artifacts"`
+	Deliveries         map[string]map[string]flow.DeliveryState    `json:"deliveries"`
+	CandidateArchives  map[string]map[string]flow.CandidateArchive `json:"candidateArchives"`
+	ComparisonSettings map[string]flow.CandidateComparisonState    `json:"comparisonSettings"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, candidateArchives: map[string]map[string]flow.CandidateArchive{}, comparisonSettings: map[string]flow.CandidateComparisonState{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -50,10 +54,17 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.Deliveries != nil {
 		s.deliveries = envelope.Deliveries
 	}
+	if envelope.CandidateArchives != nil {
+		s.candidateArchives = envelope.CandidateArchives
+	}
+	if envelope.ComparisonSettings != nil {
+		s.comparisonSettings = envelope.ComparisonSettings
+	}
 	// 磁盘上的旧数据可能把空节点/连接集合存成 null，重新打开时统一归一化为 []，
 	// 避免前端拿到未定义的节点集合后整页崩溃。
 	for id, project := range s.projects {
 		s.projects[id] = normalizeProject(project)
+		flow.ReconcileCandidateArchives(s.deliveries[id], s.candidateArchives[id])
 	}
 	return s, nil
 }
@@ -62,7 +73,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, CandidateArchives: s.candidateArchives, ComparisonSettings: s.comparisonSettings}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -86,6 +97,14 @@ func normalizeProject(project flow.Project) flow.Project {
 		}
 	}
 	return project
+}
+
+func archiveList(archives map[string]flow.CandidateArchive) []flow.CandidateArchive {
+	list := make([]flow.CandidateArchive, 0, len(archives))
+	for _, archive := range archives {
+		list = append(list, archive)
+	}
+	return list
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
@@ -155,6 +174,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		// 失效状态不存在于单次请求判断里，之后恢复原文也不能恢复其发布资格。
 		if store.deliveries[project.ID] != nil {
 			store.deliveries[project.ID] = flow.InvalidatePendingForProject(store.deliveries[project.ID], flow.ProjectVersion(project))
+			flow.MarkPendingArchivesStale(store.deliveries[project.ID], store.candidateArchives[project.ID])
 		}
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -171,7 +191,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			writeError(w, http.StatusNotFound, "工程不存在")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "deliveries": store.deliveries[id]})
+		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "deliveries": store.deliveries[id], "candidateArchives": archiveList(store.candidateArchives[id]), "comparison": store.comparisonSettings[id]})
 	})
 	mux.HandleFunc("POST /api/projects/{id}/run", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
@@ -195,7 +215,10 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			return
 		}
 		runID := newRunID()
-		result := flow.Run(project, runID, body.StartNodeIDs, store.artifacts[id], store.deliveries[id], filepath.Join(store.outputDir, id, runID))
+		if store.candidateArchives[id] == nil {
+			store.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
+		result := flow.Run(project, runID, body.StartNodeIDs, store.artifacts[id], store.deliveries[id], filepath.Join(store.outputDir, id, runID), store.candidateArchives[id])
 		if store.artifacts[id] == nil {
 			store.artifacts[id] = map[string]flow.Artifact{}
 		}
@@ -211,11 +234,16 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		if result.Deliveries != nil {
 			store.deliveries[id] = result.Deliveries
 		}
+		archiveMap := map[string]flow.CandidateArchive{}
+		for _, archive := range result.CandidateArchives {
+			archiveMap[archive.Key] = archive
+		}
+		store.candidateArchives[id] = archiveMap
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusOK, map[string]any{"run": result, "candidateArchives": result.CandidateArchives})
 	})
 	mux.HandleFunc("POST /api/projects/{id}/confirm", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
@@ -238,23 +266,52 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		if store.deliveries[id] == nil {
 			store.deliveries[id] = map[string]flow.DeliveryState{}
 		}
+		if store.candidateArchives[id] == nil {
+			store.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
 		updated, confirmed, err := flow.ConfirmDeliveries(store.deliveries[id], body.NodeIDs, body.All, body.Expected, newRunID(), flow.ProjectVersion(project))
 		if err != nil {
 			// 拒绝也要持久化：失效标记与拒绝证据落盘，恢复原文不能恢复发布资格。
 			store.deliveries[id] = updated
+			flow.MarkPendingArchivesStale(updated, store.candidateArchives[id])
 			if saveErr := store.saveLocked(); saveErr != nil {
 				writeError(w, http.StatusInternalServerError, saveErr.Error())
 				return
 			}
-			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "deliveries": updated})
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "deliveries": updated, "candidateArchives": archiveList(store.candidateArchives[id])})
 			return
 		}
 		store.deliveries[id] = updated
+		for _, nodeID := range confirmed {
+			if state, exists := updated[nodeID]; exists && state.Published != nil {
+				flow.MarkArchivePublished(store.candidateArchives[id], *state.Published)
+			}
+		}
 		if err := store.saveLocked(); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated})
+		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated, "candidateArchives": archiveList(store.candidateArchives[id])})
+	})
+	mux.HandleFunc("PUT /api/projects/{id}/candidate-comparison", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var state flow.CandidateComparisonState
+		if err := json.NewDecoder(request.Body).Decode(&state); err != nil {
+			writeError(w, http.StatusBadRequest, "对比设置 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, exists := store.projects[id]; !exists {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		store.comparisonSettings[id] = state
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"comparison": state})
 	})
 	if staticDir != "" {
 		mux.Handle("GET /", spaHandler(staticDir))

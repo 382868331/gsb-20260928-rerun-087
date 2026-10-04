@@ -94,3 +94,49 @@ export type DeliveryState = {
   published?: Delivery;
   history: DeliveryEvent[];
 };
+export type CandidateInputRevision = {
+  nodeId: string;
+  nodeName: string;
+  version: string;
+  rows: Record<string, unknown>[];
+  rowCount: number;
+};
+export type CandidateArchive = {
+  key: string;
+  nodeId: string;
+  nodeName: string;
+  receiver: string;
+  runId: string;
+  createdAt: string;
+  projectRevision: number;
+  projectVersion: string;
+  outputVersion: string;
+  outputRows: Record<string, unknown>[];
+  rows: number;
+  empty: boolean;
+  summary: string;
+  cause?: string;
+  reason?: string;
+  inputRevisions: CandidateInputRevision[];
+  status: "pending" | "pending_same" | "published" | "published_same" | "superseded" | "stale";
+};
+export type CandidateComparisonFilters = {
+  receiver: string;
+  projectRevision: string;
+  runId: string;
+  result: string;
+};
+export type CandidateComparisonState = {
+  filters: CandidateComparisonFilters;
+  leftKey: string;
+  rightKey: string;
+  onlyDiff: boolean;
+};
+export type LoadProjectResponse = {
+  project: Project;
+  artifacts: Record<string, Artifact>;
+  deliveries?: Record<string, DeliveryState>;
+  candidateArchives?: CandidateArchive[];
+  comparison?: CandidateComparisonState;
+};
+export type RunApiResponse = { run: RunResult; candidateArchives: CandidateArchive[] };

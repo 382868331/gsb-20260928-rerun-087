@@ -76,7 +76,7 @@ test("多接收方发布：运行后仅已计算，确认后对接收方可见",
       const body = JSON.parse(String(init?.body));
       return jsonResponse({ project: { ...body, revision: 1 }, validation: { ok: true, issues: [], executionOrder: [], affectedNodeIds: [] } });
     }
-    if (url.endsWith("/run")) return jsonResponse({ ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries });
+    if (url.endsWith("/run")) return jsonResponse({ run: { ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries }, candidateArchives: [] });
     if (url.endsWith("/confirm")) return jsonResponse({ confirmed: ["publish-1", "publish-2"], deliveries: confirmedDeliveries });
     return jsonResponse({}, 404);
   }));
@@ -110,7 +110,7 @@ test("双窗口：确认绑定看过的候选版本，旧页面迟到的确认�
       const body = JSON.parse(String(init?.body));
       return jsonResponse({ project: { ...body, revision: 1 }, validation: { ok: true, issues: [], executionOrder: [], affectedNodeIds: [] } });
     }
-    if (url.endsWith("/run")) return jsonResponse({ ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries: seenDeliveries });
+    if (url.endsWith("/run")) return jsonResponse({ run: { ok: true, runId: "run-1", projectVersion: "p", affectedNodeIds: [], results: {}, deliveries: seenDeliveries }, candidateArchives: [] });
     if (url.endsWith("/confirm")) {
       confirmBody = JSON.parse(String(init?.body));
       return jsonResponse({ error: "节点 publish-1 的候选已更新：迟到的旧确认被拒绝", deliveries: freshDeliveries }, 409);

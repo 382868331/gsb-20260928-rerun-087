@@ -56,6 +56,53 @@ func TestRunComputesDeliveriesForMultipleReceivers(t *testing.T) {
 	}
 }
 
+func TestCandidateArchiveKeepsSameOutputWithDifferentBasisSeparate(t *testing.T) {
+	project := publishProject()
+	first := Run(project, "run-1", nil, nil, nil, t.TempDir())
+	if !first.OK {
+		t.Fatalf("first run failed: %#v", first.Issues)
+	}
+	if len(first.CandidateArchives) != 2 {
+		t.Fatalf("first archives = %d, want 2", len(first.CandidateArchives))
+	}
+	firstArchive := first.CandidateArchives[0]
+	if len(firstArchive.InputRevisions) != 1 || firstArchive.InputRevisions[0].RowCount != 1 {
+		t.Fatalf("candidate must retain direct input revision snapshot: %#v", firstArchive.InputRevisions)
+	}
+
+	// 工程和输入产物完全不变，仅再次运行；输出版本一致，但运行依据（运行批次）不同。
+	second := Run(project, "run-2", nil, storedFrom(first), first.Deliveries, t.TempDir(), archiveMapFrom(first.CandidateArchives))
+	if !second.OK {
+		t.Fatal("identical rerun should succeed")
+	}
+	finArchives := []CandidateArchive{}
+	for _, archive := range second.CandidateArchives {
+		if archive.NodeID == "pub-fin" {
+			finArchives = append(finArchives, archive)
+		}
+	}
+	if len(finArchives) != 2 {
+		t.Fatalf("same output from different runs must remain two archives, got %d", len(finArchives))
+	}
+	if finArchives[0].OutputVersion != finArchives[1].OutputVersion {
+		t.Fatalf("expected identical output versions: %#v", finArchives)
+	}
+	if finArchives[0].RunID == finArchives[1].RunID || finArchives[0].Key == finArchives[1].Key {
+		t.Fatalf("different run basis must not merge candidates: %#v", finArchives)
+	}
+	if finArchives[1].Status != CandidateStatusPendingSame {
+		t.Fatalf("second identical candidate status = %q, want %q", finArchives[1].Status, CandidateStatusPendingSame)
+	}
+}
+
+func archiveMapFrom(archives []CandidateArchive) map[string]CandidateArchive {
+	result := map[string]CandidateArchive{}
+	for _, archive := range archives {
+		result[archive.Key] = archive
+	}
+	return result
+}
+
 func TestConfirmAllAndPartialDeliveries(t *testing.T) {
 	project := publishProject()
 	first := Run(project, "run-1", nil, nil, nil, t.TempDir())

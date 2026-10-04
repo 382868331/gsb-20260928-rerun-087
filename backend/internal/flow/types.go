@@ -1,5 +1,7 @@
 package flow
 
+import "time"
+
 type Project struct {
 	Format   string `json:"format"`
 	ID       string `json:"id"`
@@ -147,6 +149,61 @@ type DeliveryState struct {
 	History   []DeliveryEvent `json:"history"`
 }
 
+// CandidateInputRevision 是候选计算时直接输入端口的不可变快照。
+type CandidateInputRevision struct {
+	NodeID   string `json:"nodeId"`
+	NodeName string `json:"nodeName"`
+	Version  string `json:"version"`
+	Rows     []Row  `json:"rows"`
+	RowCount int    `json:"rowCount"`
+}
+
+// CandidateArchive 是跨运行候选对比使用的只读档案。
+// 即使输出记录与已有候选完全一致，也以运行批次作为独立档案保存，不能合并。
+type CandidateArchive struct {
+	Key             string                   `json:"key"`
+	NodeID          string                   `json:"nodeId"`
+	NodeName        string                   `json:"nodeName"`
+	Receiver        string                   `json:"receiver"`
+	RunID           string                   `json:"runId"`
+	CreatedAt       time.Time                `json:"createdAt"`
+	ProjectRevision int                      `json:"projectRevision"`
+	ProjectVersion  string                   `json:"projectVersion"`
+	OutputVersion   string                   `json:"outputVersion"`
+	OutputRows      []Row                    `json:"outputRows"`
+	Rows            int                      `json:"rows"`
+	Empty           bool                     `json:"empty"`
+	Summary         string                   `json:"summary"`
+	Cause           string                   `json:"cause,omitempty"`
+	Reason          string                   `json:"reason,omitempty"`
+	InputRevisions  []CandidateInputRevision `json:"inputRevisions"`
+	Status          string                   `json:"status"`
+}
+
+type CandidateComparisonFilters struct {
+	Receiver        string `json:"receiver"`
+	ProjectRevision int    `json:"projectRevision"`
+	RunID           string `json:"runId"`
+	Result          string `json:"result"`
+}
+
+// CandidateComparisonState 是用户保存的只读核对现场。
+type CandidateComparisonState struct {
+	Filters  CandidateComparisonFilters `json:"filters"`
+	LeftKey  string                     `json:"leftKey"`
+	RightKey string                     `json:"rightKey"`
+	OnlyDiff bool                       `json:"onlyDiff"`
+}
+
+const (
+	CandidateStatusPending       = "pending"
+	CandidateStatusPendingSame   = "pending_same"
+	CandidateStatusPublished     = "published"
+	CandidateStatusPublishedSame = "published_same"
+	CandidateStatusSuperseded    = "superseded"
+	CandidateStatusStale         = "stale"
+)
+
 const (
 	CauseReused      = "reused"
 	CauseRerunFull   = "rerun_full"
@@ -157,11 +214,12 @@ const (
 )
 
 type RunResult struct {
-	OK              bool                     `json:"ok"`
-	RunID           string                   `json:"runId"`
-	ProjectVersion  string                   `json:"projectVersion"`
-	AffectedNodeIDs []string                 `json:"affectedNodeIds"`
-	Results         map[string]NodeResult    `json:"results"`
-	Deliveries      map[string]DeliveryState `json:"deliveries,omitempty"`
-	Issues          []Issue                  `json:"issues,omitempty"`
+	OK                bool                     `json:"ok"`
+	RunID             string                   `json:"runId"`
+	ProjectVersion    string                   `json:"projectVersion"`
+	AffectedNodeIDs   []string                 `json:"affectedNodeIds"`
+	Results           map[string]NodeResult    `json:"results"`
+	Deliveries        map[string]DeliveryState `json:"deliveries,omitempty"`
+	CandidateArchives []CandidateArchive       `json:"candidateArchives,omitempty"`
+	Issues            []Issue                  `json:"issues,omitempty"`
 }

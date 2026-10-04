@@ -52,10 +52,12 @@ func TestSaveRunAndReloadProject(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("run status = %d", response.Code)
 	}
-	var run flow.RunResult
-	json.NewDecoder(response.Body).Decode(&run)
-	if !run.OK || run.Results["out"].Artifact == nil {
-		t.Fatalf("run should produce output: %#v", run)
+	var runResponse struct {
+		Run flow.RunResult `json:"run"`
+	}
+	json.NewDecoder(response.Body).Decode(&runResponse)
+	if !runResponse.Run.OK || runResponse.Run.Results["out"].Artifact == nil {
+		t.Fatalf("run should produce output: %#v", runResponse.Run)
 	}
 
 	reloadedStore, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
@@ -167,10 +169,12 @@ func TestRunConfirmAndReloadDeliveries(t *testing.T) {
 	request = httptest.NewRequest(http.MethodPost, "/api/projects/pub-http/run", bytes.NewBufferString(`{"startNodeIds":[]}`))
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	var run flow.RunResult
-	json.NewDecoder(response.Body).Decode(&run)
-	if !run.OK || run.Deliveries["pub"].Pending == nil {
-		t.Fatalf("run should compute a pending delivery: %#v", run)
+	var runResponse struct {
+		Run flow.RunResult `json:"run"`
+	}
+	json.NewDecoder(response.Body).Decode(&runResponse)
+	if !runResponse.Run.OK || runResponse.Run.Deliveries["pub"].Pending == nil {
+		t.Fatalf("run should compute a pending delivery: %#v", runResponse.Run)
 	}
 
 	// 确认途中重新打开：接收方视角应与确认前一致（仍不可见）。
@@ -228,9 +232,11 @@ func runProject(t *testing.T, handler http.Handler, id string) flow.RunResult {
 	if response.Code != http.StatusOK {
 		t.Fatalf("run status = %d, body %s", response.Code, response.Body.String())
 	}
-	var run flow.RunResult
-	json.NewDecoder(response.Body).Decode(&run)
-	return run
+	var envelope struct {
+		Run flow.RunResult `json:"run"`
+	}
+	json.NewDecoder(response.Body).Decode(&envelope)
+	return envelope.Run
 }
 
 func confirmProject(handler http.Handler, id string, body string) *httptest.ResponseRecorder {

@@ -4,10 +4,11 @@ import "@xyflow/react/dist/style.css";
 import { api } from "./api";
 import { blankProject, createNode, downstreamIds, emptyProject, normalizeProject, toReactEdge } from "./project";
 import { DataPanel } from "./components/DataPanel";
+import { CandidateComparison } from "./components/CandidateComparison";
 import { Inspector } from "./components/Inspector";
 import { PublishPanel } from "./components/PublishPanel";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { ComponentDef, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
+import type { CandidateArchive, CandidateComparisonState, ComponentDef, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
 
@@ -25,6 +26,8 @@ export default function App() {
   const [validation, setValidation] = useState<Validation>();
   const [run, setRun] = useState<RunResult>();
   const [deliveries, setDeliveries] = useState<Record<string, DeliveryState>>({});
+  const [candidateArchives, setCandidateArchives] = useState<CandidateArchive[]>([]);
+  const [comparisonState, setComparisonState] = useState<CandidateComparisonState>();
   const [confirming, setConfirming] = useState(false);
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const staleIds = useMemo(() => downstreamIds(project, [...dirtyIds]), [project, dirtyIds]);
@@ -107,6 +110,8 @@ export default function App() {
     setProject(blankProject());
     setRun(undefined);
     setDeliveries({});
+    setCandidateArchives([]);
+    setComparisonState(undefined);
     setValidation(undefined);
     setDirtyIds(new Set());
     setSavedSnapshot(undefined);
@@ -171,14 +176,17 @@ export default function App() {
       return;
     }
     let result: RunResult;
+    let runResponse: Awaited<ReturnType<typeof api.run>>;
     try {
-      result = await api.run(saved.id, startNodeIds);
+      runResponse = await api.run(saved.id, startNodeIds);
+      result = runResponse.run;
     } catch (error) {
       setMessage("运行请求失败：" + (error instanceof Error ? error.message : "后端不可用") + "，本轮没有产生新结果。");
       return;
     }
     setRun(result);
     if (result.deliveries) setDeliveries(result.deliveries);
+    setCandidateArchives(runResponse.candidateArchives ?? []);
     setDirtyIds(new Set());
     setSavedSnapshot({ project: structuredClone(saved), run: result });
     setMessage(result.ok ? "运行成功。" : "运行失败：下游已被阻断，不能把旧结果当成本轮输出。");
@@ -194,6 +202,7 @@ export default function App() {
         .map((state) => ({ nodeId: state.nodeId, version: state.pending!.version, runId: state.pending!.runId }));
       const response = await api.confirm(project.id, { ...body, expected });
       setDeliveries(response.deliveries);
+      if (response.candidateArchives) setCandidateArchives(response.candidateArchives);
       setMessage(body.all ? "全部待确认结果已共同确认，对接收方可见。" : "该结果已先行确认，对接收方可见。");
     } catch (error) {
       setMessage("确认失败：" + (error instanceof Error ? error.message : "后端不可用") + "，待确认状态未变更。");
@@ -201,6 +210,7 @@ export default function App() {
       try {
         const loaded = await api.loadProject(project.id);
         if (loaded.deliveries) setDeliveries(loaded.deliveries);
+        if (loaded.candidateArchives) setCandidateArchives(loaded.candidateArchives);
       } catch { /* 保留本地状态 */ }
     } finally {
       setConfirming(false);
@@ -213,6 +223,8 @@ export default function App() {
       const restored = normalizeProject(loaded.project);
       setProject(restored);
       setDeliveries(loaded.deliveries ?? {});
+      setCandidateArchives(loaded.candidateArchives ?? []);
+      setComparisonState(loaded.comparison);
       const results: RunResult["results"] = {};
       Object.values(loaded.artifacts ?? {}).forEach((artifact) => { results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId }; });
       setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
@@ -242,5 +254,9 @@ export default function App() {
       <DataPanel project={project} selectedId={selectedId} run={run} />
       <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={() => confirm({ all: true })} onConfirmOne={(nodeId) => confirm({ nodeIds: [nodeId] })} />
     </div>
+    <CandidateComparison archives={candidateArchives} savedState={comparisonState} onSave={async (state) => {
+      const saved = await api.saveComparison(project.id, state);
+      setComparisonState(saved.comparison);
+    }} />
   </div>;
 }

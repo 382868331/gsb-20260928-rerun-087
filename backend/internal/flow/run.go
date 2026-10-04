@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
-func Run(project Project, runID string, startNodeIDs []string, stored map[string]Artifact, deliveries map[string]DeliveryState, outputRoot string) RunResult {
+func Run(project Project, runID string, startNodeIDs []string, stored map[string]Artifact, deliveries map[string]DeliveryState, outputRoot string, archiveArgs ...map[string]CandidateArchive) RunResult {
 	validation := Validate(project)
 	if !validation.OK {
 		return RunResult{OK: false, RunID: runID, Issues: validation.Issues}
@@ -55,6 +56,12 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 	updatedDeliveries := make(map[string]DeliveryState)
 	for nodeID, state := range deliveries {
 		updatedDeliveries[nodeID] = state
+	}
+	updatedArchives := map[string]CandidateArchive{}
+	if len(archiveArgs) > 0 && archiveArgs[0] != nil {
+		for key, archive := range archiveArgs[0] {
+			updatedArchives[key] = archive
+		}
 	}
 
 	ok := true
@@ -100,6 +107,7 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 			continue
 		}
 		cause, reason := rerunReason(node, started[nodeID], startNodeIDs, incoming[nodeID], upstreamVersions, baselineVersions, artifacts)
+		inputRevisions := candidateInputRevisions(incoming[nodeID], nodes, results, artifacts)
 		artifact, err := executeNode(node, upstreamRows, upstreamVersions, runID, outputRoot)
 		if err != nil {
 			ok = false
@@ -110,7 +118,7 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		artifacts[nodeID] = artifact
 		if node.Type == "publish" {
 			var deliveryNote string
-			updatedDeliveries, deliveryNote = recordComputedDelivery(updatedDeliveries, node, artifact, runID, projectVersion)
+			updatedDeliveries, deliveryNote, _ = recordComputedDelivery(updatedDeliveries, updatedArchives, node, artifact, runID, projectVersion, project.Revision, cause, reason, inputRevisions)
 			reason = reason + "；" + deliveryNote
 		}
 		results[nodeID] = NodeResult{NodeID: nodeID, Status: "succeeded", Artifact: &artifact, Reason: reason, Cause: cause}
@@ -128,6 +136,7 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		}
 		updatedDeliveries = invalidatePendingDelivery(updatedDeliveries, nodeID,
 			fmt.Sprintf("本轮运行中该分支%s（%s），待确认结果失去运行依据", statusLabel(nodeResult.Status), nodeResult.Error))
+		updatedArchives = markArchiveStale(updatedArchives, updatedDeliveries[nodeID])
 	}
 
 	affectedList := make([]string, 0, len(affected))
@@ -135,7 +144,117 @@ func Run(project Project, runID string, startNodeIDs []string, stored map[string
 		affectedList = append(affectedList, nodeID)
 	}
 	sort.Strings(affectedList)
-	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries}
+	archiveList := make([]CandidateArchive, 0, len(updatedArchives))
+	for _, archive := range updatedArchives {
+		archiveList = append(archiveList, archive)
+	}
+	sort.Slice(archiveList, func(i, j int) bool {
+		if archiveList[i].CreatedAt.Equal(archiveList[j].CreatedAt) {
+			return archiveList[i].Key < archiveList[j].Key
+		}
+		return archiveList[i].CreatedAt.Before(archiveList[j].CreatedAt)
+	})
+	return RunResult{OK: ok, RunID: runID, ProjectVersion: projectVersion, AffectedNodeIDs: affectedList, Results: results, Deliveries: updatedDeliveries, CandidateArchives: archiveList}
+}
+
+func candidateInputRevisions(edges []Edge, nodes map[string]Node, results map[string]NodeResult, artifacts map[string]Artifact) []CandidateInputRevision {
+	seen := map[string]bool{}
+	inputRevisions := make([]CandidateInputRevision, 0)
+	for _, edge := range edges {
+		if seen[edge.Source] {
+			continue
+		}
+		seen[edge.Source] = true
+		var artifact *Artifact
+		if result, exists := results[edge.Source]; exists {
+			artifact = result.Artifact
+		} else if stored, exists := artifacts[edge.Source]; exists {
+			artifact = &stored
+		}
+		if artifact == nil {
+			continue
+		}
+		rows := artifact.Rows
+		if rows == nil {
+			rows = []Row{}
+		}
+		inputRevisions = append(inputRevisions, CandidateInputRevision{
+			NodeID:   edge.Source,
+			NodeName: nodes[edge.Source].Name,
+			Version:  artifact.Version,
+			Rows:     rows,
+			RowCount: len(rows),
+		})
+	}
+	sort.Slice(inputRevisions, func(i, j int) bool { return inputRevisions[i].NodeID < inputRevisions[j].NodeID })
+	return inputRevisions
+}
+
+func candidateArchiveKey(nodeID string, runID string, version string) string {
+	return nodeID + "\x00" + runID + "\x00" + version
+}
+
+func markArchiveStale(archives map[string]CandidateArchive, state DeliveryState) map[string]CandidateArchive {
+	if state.Pending == nil {
+		return archives
+	}
+	key := candidateArchiveKey(state.NodeID, state.Pending.RunID, state.Pending.Version)
+	archive, exists := archives[key]
+	if exists && archive.Status != CandidateStatusPublished && archive.Status != CandidateStatusPublishedSame {
+		archive.Status = CandidateStatusStale
+		archives[key] = archive
+	}
+	return archives
+}
+
+// MarkArchivePublished 在确认成功后只更新对比档案状态；发布事实仍由 DeliveryState 决定。
+func MarkArchivePublished(archives map[string]CandidateArchive, delivery Delivery) {
+	if archives == nil {
+		return
+	}
+	key := candidateArchiveKey(delivery.NodeID, delivery.RunID, delivery.Version)
+	archive, exists := archives[key]
+	if !exists {
+		return
+	}
+	archive.Status = CandidateStatusPublished
+	archives[key] = archive
+}
+
+// MarkPendingArchivesStale 持久化候选失效时同步其只读档案，不改变发布资格逻辑。
+func MarkPendingArchivesStale(deliveries map[string]DeliveryState, archives map[string]CandidateArchive) {
+	for _, state := range deliveries {
+		if state.Pending != nil && state.Pending.Stale {
+			markArchiveStale(archives, state)
+		}
+	}
+}
+
+// ReconcileCandidateArchives 用当前发布状态校正只读档案的展示状态。
+func ReconcileCandidateArchives(deliveries map[string]DeliveryState, archives map[string]CandidateArchive) {
+	if archives == nil {
+		return
+	}
+	for key, archive := range archives {
+		state := deliveries[archive.NodeID]
+		if state.Published != nil && archive.RunID == state.Published.RunID && archive.OutputVersion == state.Published.Version {
+			archive.Status = CandidateStatusPublished
+			archives[key] = archive
+			continue
+		}
+		if state.Pending != nil && archive.RunID == state.Pending.RunID && archive.OutputVersion == state.Pending.Version {
+			if state.Pending.Stale {
+				archive.Status = CandidateStatusStale
+			} else if state.Published != nil && state.Published.Version == archive.OutputVersion {
+				archive.Status = CandidateStatusPublishedSame
+			} else if archive.Status == CandidateStatusPendingSame {
+				archive.Status = CandidateStatusPendingSame
+			} else {
+				archive.Status = CandidateStatusPending
+			}
+			archives[key] = archive
+		}
+	}
 }
 
 func statusLabel(status string) string {
@@ -166,8 +285,9 @@ func invalidatePendingDelivery(deliveries map[string]DeliveryState, nodeID strin
 // - 版本与已发布一致时不重复发布，保留原已发布记录；
 // - 版本与待确认一致时沿用待确认结果；
 // - 共享上游变化导致版本不同时，旧待确认被取代（需重新核对来源），已发布版本保留。
-func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, artifact Artifact, runID string, projectVersion string) (map[string]DeliveryState, string) {
+func recordComputedDelivery(deliveries map[string]DeliveryState, archives map[string]CandidateArchive, node Node, artifact Artifact, runID string, projectVersion string, projectRevision int, cause string, reason string, inputRevisions []CandidateInputRevision) (map[string]DeliveryState, string, string) {
 	state := deliveries[node.ID]
+	oldPending := state.Pending
 	state.NodeID = node.ID
 	state.Receiver = paramString(node.Params["receiver"])
 	if state.History == nil {
@@ -189,28 +309,68 @@ func recordComputedDelivery(deliveries map[string]DeliveryState, node Node, arti
 		Empty:          len(artifact.Rows) == 0,
 		Summary:        artifact.Summary,
 	}
+	archive := CandidateArchive{
+		Key:             candidateArchiveKey(node.ID, runID, artifact.Version),
+		NodeID:          node.ID,
+		NodeName:        node.Name,
+		Receiver:        state.Receiver,
+		RunID:           runID,
+		CreatedAt:       time.Now().UTC(),
+		ProjectRevision: projectRevision,
+		ProjectVersion:  projectVersion,
+		OutputVersion:   artifact.Version,
+		OutputRows:      artifact.Rows,
+		Rows:            len(artifact.Rows),
+		Empty:           len(artifact.Rows) == 0,
+		Summary:         artifact.Summary,
+		Cause:           cause,
+		Reason:          reason,
+		InputRevisions:  inputRevisions,
+	}
+	candidateStatus := CandidateStatusPending
 	switch {
 	case state.Published != nil && state.Published.Version == computed.Version:
+		candidateStatus = CandidateStatusPublishedSame
 		deliveries[node.ID] = state
 		if replacedStale {
-			return deliveries, "本轮结果与已发布版本一致，不重复发布；失效旧候选已清除留证"
+			archives[archive.Key] = withArchiveStatus(archive, candidateStatus)
+			return deliveries, "本轮结果与已发布版本一致，不重复发布；失效旧候选已清除留证", candidateStatus
 		}
-		return deliveries, "版本与已发布结果一致，不重复发布"
+		archives[archive.Key] = withArchiveStatus(archive, candidateStatus)
+		return deliveries, "版本与已发布结果一致，不重复发布", candidateStatus
 	case state.Pending != nil && state.Pending.Version == computed.Version:
+		candidateStatus = CandidateStatusPendingSame
 		deliveries[node.ID] = state
-		return deliveries, "待确认版本未变，沿用待确认结果"
+		archives[archive.Key] = withArchiveStatus(archive, candidateStatus)
+		return deliveries, "待确认版本未变，沿用待确认结果", candidateStatus
 	default:
+		if oldPending != nil {
+			oldKey := candidateArchiveKey(node.ID, oldPending.RunID, oldPending.Version)
+			if oldArchive, exists := archives[oldKey]; exists && oldArchive.Status != CandidateStatusStale {
+				oldArchive.Status = CandidateStatusSuperseded
+				archives[oldKey] = oldArchive
+			}
+		}
 		if state.Pending != nil {
 			state.History = append(state.History, DeliveryEvent{Kind: EventSuperseded, Version: state.Pending.Version, RunID: runID, Note: "上游来源变化，旧待确认结果被取代，需重新核对"})
 		}
 		state.Pending = &computed
 		state.History = append(state.History, DeliveryEvent{Kind: EventComputed, Version: computed.Version, RunID: runID, Note: "本轮仅已计算，确认前对接收方不可见"})
 		deliveries[node.ID] = state
+		archives[archive.Key] = withArchiveStatus(archive, candidateStatus)
 		if replacedStale {
-			return deliveries, "重新计算成功，产生新的待确认版本（失效旧候选仅留证，确认后才对接收方可见）"
+			return deliveries, "重新计算成功，产生新的待确认版本（失效旧候选仅留证，确认后才对接收方可见）", candidateStatus
 		}
-		return deliveries, "本轮结果仅已计算，确认后才对接收方可见"
+		return deliveries, "本轮结果仅已计算，确认后才对接收方可见", candidateStatus
 	}
+}
+
+func withArchiveStatus(archive CandidateArchive, status string) CandidateArchive {
+	archive.Status = status
+	if archive.OutputRows == nil {
+		archive.OutputRows = []Row{}
+	}
+	return archive
 }
 
 // ConfirmDeliveries 把待确认投递标记为对接收方可见；all 为 true 时要求全部待确认一起确认，

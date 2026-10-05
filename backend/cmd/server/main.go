@@ -20,6 +20,7 @@ type store struct {
 	projects           map[string]flow.Project
 	artifacts          map[string]map[string]flow.Artifact
 	deliveries         map[string]map[string]flow.DeliveryState
+	groups             map[string]map[string]flow.PublishGroup
 	candidateArchives  map[string]map[string]flow.CandidateArchive
 	comparisonSettings map[string]flow.CandidateComparisonState
 }
@@ -28,12 +29,13 @@ type savedEnvelope struct {
 	Projects           map[string]flow.Project                     `json:"projects"`
 	Artifacts          map[string]map[string]flow.Artifact         `json:"artifacts"`
 	Deliveries         map[string]map[string]flow.DeliveryState    `json:"deliveries"`
+	Groups             map[string]map[string]flow.PublishGroup     `json:"groups"`
 	CandidateArchives  map[string]map[string]flow.CandidateArchive `json:"candidateArchives"`
 	ComparisonSettings map[string]flow.CandidateComparisonState    `json:"comparisonSettings"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, candidateArchives: map[string]map[string]flow.CandidateArchive{}, comparisonSettings: map[string]flow.CandidateComparisonState{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, groups: map[string]map[string]flow.PublishGroup{}, candidateArchives: map[string]map[string]flow.CandidateArchive{}, comparisonSettings: map[string]flow.CandidateComparisonState{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -54,6 +56,9 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.Deliveries != nil {
 		s.deliveries = envelope.Deliveries
 	}
+	if envelope.Groups != nil {
+		s.groups = envelope.Groups
+	}
 	if envelope.CandidateArchives != nil {
 		s.candidateArchives = envelope.CandidateArchives
 	}
@@ -66,6 +71,36 @@ func newStore(file string, outputDir string) (*store, error) {
 		s.projects[id] = normalizeProject(project)
 		flow.ReconcileCandidateArchives(s.deliveries[id], s.candidateArchives[id])
 	}
+	// 上次进程退出时停留在提交中的发布组必须恢复到确定结局：
+	// 重新打开（页面刷新）后重放幂等提交，不会重复发布，也不会永远卡在提交中。
+	recovered := false
+	for id, projectGroups := range s.groups {
+		project, exists := s.projects[id]
+		if !exists {
+			continue
+		}
+		if s.deliveries[id] == nil {
+			s.deliveries[id] = map[string]flow.DeliveryState{}
+		}
+		if s.candidateArchives[id] == nil {
+			s.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
+		for groupID, group := range projectGroups {
+			if group.Status != flow.GroupStatusCommitting {
+				continue
+			}
+			updated, _, err := flow.RecoverGroup(s.deliveries[id], projectGroups, s.candidateArchives[id], groupID, flow.ProjectVersion(project))
+			if err == nil {
+				s.deliveries[id] = updated
+				recovered = true
+			}
+		}
+	}
+	if recovered {
+		if err := s.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
 	return s, nil
 }
 
@@ -73,7 +108,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, CandidateArchives: s.candidateArchives, ComparisonSettings: s.comparisonSettings}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, Groups: s.groups, CandidateArchives: s.candidateArchives, ComparisonSettings: s.comparisonSettings}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -191,7 +226,7 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			writeError(w, http.StatusNotFound, "工程不存在")
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "deliveries": store.deliveries[id], "candidateArchives": archiveList(store.candidateArchives[id]), "comparison": store.comparisonSettings[id]})
+		writeJSON(w, http.StatusOK, map[string]any{"project": project, "artifacts": store.artifacts[id], "deliveries": store.deliveries[id], "groups": store.groups[id], "candidateArchives": archiveList(store.candidateArchives[id]), "comparison": store.comparisonSettings[id]})
 	})
 	mux.HandleFunc("POST /api/projects/{id}/run", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")
@@ -292,6 +327,144 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"confirmed": confirmed, "deliveries": updated, "candidateArchives": archiveList(store.candidateArchives[id])})
+	})
+	mux.HandleFunc("POST /api/projects/{id}/groups", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var body struct {
+			Members      []flow.PublishGroupMember     `json:"members"`
+			Dependencies []flow.PublishGroupDependency `json:"dependencies"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "发布组请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		project, ok := store.projects[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		if store.groups[id] == nil {
+			store.groups[id] = map[string]flow.PublishGroup{}
+		}
+		group, err := flow.PrepareGroup(store.deliveries[id], "grp-"+newRunID(), body.Members, body.Dependencies, flow.ProjectVersion(project))
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "groups": store.groups[id]})
+			return
+		}
+		store.groups[id][group.ID] = group
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"group": group, "groups": store.groups[id]})
+	})
+	mux.HandleFunc("POST /api/projects/{id}/groups/{gid}/commit", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		gid := request.PathValue("gid")
+		var body struct {
+			UnavailableReceivers []string `json:"unavailableReceivers"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "提交请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		project, ok := store.projects[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		if store.groups[id] == nil {
+			store.groups[id] = map[string]flow.PublishGroup{}
+		}
+		if store.deliveries[id] == nil {
+			store.deliveries[id] = map[string]flow.DeliveryState{}
+		}
+		if store.candidateArchives[id] == nil {
+			store.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
+		unavailable := map[string]bool{}
+		for _, nodeID := range body.UnavailableReceivers {
+			unavailable[nodeID] = true
+		}
+		updated, group, err := flow.CommitGroup(store.deliveries[id], store.groups[id], store.candidateArchives[id], gid, unavailable, flow.ProjectVersion(project))
+		store.deliveries[id] = updated
+		// 无论成功、冲突还是中途不可用，当前确定状态（含 committing）都先落盘：
+		// 页面刷新或进程重启后据此恢复，不会重复发布。
+		if saveErr := store.saveLocked(); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
+			return
+		}
+		payload := map[string]any{"group": group, "groups": store.groups[id], "deliveries": store.deliveries[id], "candidateArchives": archiveList(store.candidateArchives[id])}
+		if err != nil {
+			payload["error"] = err.Error()
+			status := http.StatusConflict
+			if group.Status == flow.GroupStatusCommitting {
+				status = http.StatusServiceUnavailable
+			}
+			writeJSON(w, status, payload)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("POST /api/projects/{id}/groups/{gid}/recover", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		gid := request.PathValue("gid")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		project, ok := store.projects[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		if store.groups[id] == nil {
+			store.groups[id] = map[string]flow.PublishGroup{}
+		}
+		if store.deliveries[id] == nil {
+			store.deliveries[id] = map[string]flow.DeliveryState{}
+		}
+		if store.candidateArchives[id] == nil {
+			store.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
+		updated, group, err := flow.RecoverGroup(store.deliveries[id], store.groups[id], store.candidateArchives[id], gid, flow.ProjectVersion(project))
+		store.deliveries[id] = updated
+		if saveErr := store.saveLocked(); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
+			return
+		}
+		payload := map[string]any{"group": group, "groups": store.groups[id], "deliveries": store.deliveries[id], "candidateArchives": archiveList(store.candidateArchives[id])}
+		if err != nil {
+			payload["error"] = err.Error()
+			writeJSON(w, http.StatusConflict, payload)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("POST /api/projects/{id}/groups/{gid}/cancel", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		gid := request.PathValue("gid")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		if store.groups[id] == nil {
+			store.groups[id] = map[string]flow.PublishGroup{}
+		}
+		group, err := flow.CancelGroup(store.groups[id], gid)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "group": group, "groups": store.groups[id]})
+			return
+		}
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"group": group, "groups": store.groups[id]})
 	})
 	mux.HandleFunc("PUT /api/projects/{id}/candidate-comparison", func(w http.ResponseWriter, request *http.Request) {
 		id := request.PathValue("id")

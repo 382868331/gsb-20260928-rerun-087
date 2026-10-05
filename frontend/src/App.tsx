@@ -7,8 +7,9 @@ import { DataPanel } from "./components/DataPanel";
 import { CandidateComparison } from "./components/CandidateComparison";
 import { Inspector } from "./components/Inspector";
 import { PublishPanel } from "./components/PublishPanel";
+import { PublishGroupPanel } from "./components/PublishGroupPanel";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { CandidateArchive, CandidateComparisonState, ComponentDef, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
+import type { CandidateArchive, CandidateComparisonState, ComponentDef, DeliveryState, GroupResponse, Issue, Project, PublishGroup, PublishGroupDependency, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
 
@@ -26,6 +27,7 @@ export default function App() {
   const [validation, setValidation] = useState<Validation>();
   const [run, setRun] = useState<RunResult>();
   const [deliveries, setDeliveries] = useState<Record<string, DeliveryState>>({});
+  const [publishGroups, setPublishGroups] = useState<Record<string, PublishGroup>>({});
   const [candidateArchives, setCandidateArchives] = useState<CandidateArchive[]>([]);
   const [comparisonState, setComparisonState] = useState<CandidateComparisonState>();
   const [confirming, setConfirming] = useState(false);
@@ -110,6 +112,7 @@ export default function App() {
     setProject(blankProject());
     setRun(undefined);
     setDeliveries({});
+    setPublishGroups({});
     setCandidateArchives([]);
     setComparisonState(undefined);
     setValidation(undefined);
@@ -217,12 +220,74 @@ export default function App() {
     }
   }
 
+  // 发布组操作的统一收尾：成功或被拒（冲突 / 失效 / 接收方不可用）都把后端返回的
+  // 确定状态（含提交中）落到页面上，刷新后看到的状态与这里一致。
+  function applyGroupResponse(response: GroupResponse, okMessage: string) {
+    if (response.groups) setPublishGroups(response.groups);
+    if (response.deliveries) setDeliveries(response.deliveries);
+    if (response.candidateArchives) setCandidateArchives(response.candidateArchives);
+    setMessage(response.error ? "发布组操作未完成：" + response.error : okMessage);
+  }
+
+  async function prepareGroup(memberIds: string[], dependencies: PublishGroupDependency[]) {
+    setConfirming(true);
+    try {
+      const members = memberIds.map((nodeId) => {
+        const pending = deliveries[nodeId]?.pending;
+        return { nodeId, version: pending?.version ?? "", runId: pending?.runId ?? "" };
+      });
+      const response = await api.prepareGroup(project.id, { members, dependencies });
+      applyGroupResponse(response, "发布组已组成（准备中）：共同校验通过，可提交整组或在提交前取消。");
+    } catch (error) {
+      setMessage("组成发布组失败：" + (error instanceof Error ? error.message : "后端不可用"));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function commitGroup(groupId: string, unavailable: string[]) {
+    setConfirming(true);
+    try {
+      const response = await api.commitGroup(project.id, groupId, unavailable);
+      applyGroupResponse(response, "发布组已整组提交：所有接收方同时可见新版本。");
+    } catch (error) {
+      setMessage("提交发布组失败：" + (error instanceof Error ? error.message : "后端不可用") + "，可重试或刷新页面恢复。");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function recoverGroup(groupId: string) {
+    setConfirming(true);
+    try {
+      const response = await api.recoverGroup(project.id, groupId);
+      applyGroupResponse(response, "发布组已恢复到确定结局：整组提交完成。");
+    } catch (error) {
+      setMessage("恢复发布组失败：" + (error instanceof Error ? error.message : "后端不可用"));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  async function cancelGroup(groupId: string) {
+    setConfirming(true);
+    try {
+      const response = await api.cancelGroup(project.id, groupId);
+      applyGroupResponse(response, "发布组已整组取消，未发布任何结果。");
+    } catch (error) {
+      setMessage("取消发布组失败：" + (error instanceof Error ? error.message : "后端不可用"));
+    } finally {
+      setConfirming(false);
+    }
+  }
+
   async function reopen() {
     try {
       const loaded = await api.loadProject(project.id);
       const restored = normalizeProject(loaded.project);
       setProject(restored);
       setDeliveries(loaded.deliveries ?? {});
+      setPublishGroups(loaded.groups ?? {});
       setCandidateArchives(loaded.candidateArchives ?? []);
       setComparisonState(loaded.comparison);
       const results: RunResult["results"] = {};
@@ -253,6 +318,7 @@ export default function App() {
     <div className="bottom-panels">
       <DataPanel project={project} selectedId={selectedId} run={run} />
       <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={() => confirm({ all: true })} onConfirmOne={(nodeId) => confirm({ nodeIds: [nodeId] })} />
+      <PublishGroupPanel project={project} deliveries={deliveries} groups={publishGroups} busy={confirming} onPrepare={prepareGroup} onCommit={commitGroup} onRecover={recoverGroup} onCancel={cancelGroup} />
     </div>
     <CandidateComparison archives={candidateArchives} savedState={comparisonState} onSave={async (state) => {
       const saved = await api.saveComparison(project.id, state);

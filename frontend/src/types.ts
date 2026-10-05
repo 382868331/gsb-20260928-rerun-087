@@ -138,5 +138,23 @@ export type LoadProjectResponse = {
   deliveries?: Record<string, DeliveryState>;
   candidateArchives?: CandidateArchive[];
   comparison?: CandidateComparisonState;
+  publishGroups?: PublishGroup[];
 };
 export type RunApiResponse = { run: RunResult; candidateArchives: CandidateArchive[] };
+export type PublishGroupMember = { nodeId: string; receiver: string; version: string; runId: string; baseVersion: string };
+export type PublishGroupDependency = { receiver: string; onReceiver: string; version: string };
+export type ReceiverOutcome = { receiver: string; nodeId: string; version: string; runId: string; committed: boolean; note?: string };
+export type PublishGroupStatus = "prepared" | "committing" | "committed" | "aborted" | "cancelled";
+export type PublishGroup = {
+  id: string;
+  runId: string;
+  projectVersion: string;
+  members: PublishGroupMember[];
+  dependencies: PublishGroupDependency[];
+  status: PublishGroupStatus;
+  statusNote?: string;
+  outcomes?: ReceiverOutcome[];
+  createdAt: string;
+  updatedAt: string;
+};
+export type PublishGroupResponse = { group?: PublishGroup; publishGroups?: PublishGroup[]; deliveries?: Record<string, DeliveryState>; candidateArchives?: CandidateArchive[]; error?: string };

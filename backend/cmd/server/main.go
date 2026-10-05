@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ type store struct {
 	deliveries         map[string]map[string]flow.DeliveryState
 	candidateArchives  map[string]map[string]flow.CandidateArchive
 	comparisonSettings map[string]flow.CandidateComparisonState
+	publishGroups      map[string]map[string]flow.PublishGroup
+	receiverDown       map[string]map[string]bool
 }
 
 type savedEnvelope struct {
@@ -30,10 +33,11 @@ type savedEnvelope struct {
 	Deliveries         map[string]map[string]flow.DeliveryState    `json:"deliveries"`
 	CandidateArchives  map[string]map[string]flow.CandidateArchive `json:"candidateArchives"`
 	ComparisonSettings map[string]flow.CandidateComparisonState    `json:"comparisonSettings"`
+	PublishGroups      map[string]map[string]flow.PublishGroup     `json:"publishGroups"`
 }
 
 func newStore(file string, outputDir string) (*store, error) {
-	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, candidateArchives: map[string]map[string]flow.CandidateArchive{}, comparisonSettings: map[string]flow.CandidateComparisonState{}}
+	s := &store{file: file, outputDir: outputDir, projects: map[string]flow.Project{}, artifacts: map[string]map[string]flow.Artifact{}, deliveries: map[string]map[string]flow.DeliveryState{}, candidateArchives: map[string]map[string]flow.CandidateArchive{}, comparisonSettings: map[string]flow.CandidateComparisonState{}, publishGroups: map[string]map[string]flow.PublishGroup{}, receiverDown: map[string]map[string]bool{}}
 	encoded, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -60,6 +64,9 @@ func newStore(file string, outputDir string) (*store, error) {
 	if envelope.ComparisonSettings != nil {
 		s.comparisonSettings = envelope.ComparisonSettings
 	}
+	if envelope.PublishGroups != nil {
+		s.publishGroups = envelope.PublishGroups
+	}
 	// 磁盘上的旧数据可能把空节点/连接集合存成 null，重新打开时统一归一化为 []，
 	// 避免前端拿到未定义的节点集合后整页崩溃。
 	for id, project := range s.projects {
@@ -73,7 +80,7 @@ func (s *store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.file), 0o755); err != nil {
 		return err
 	}
-	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, CandidateArchives: s.candidateArchives, ComparisonSettings: s.comparisonSettings}, "", "  ")
+	encoded, err := json.MarshalIndent(savedEnvelope{Projects: s.projects, Artifacts: s.artifacts, Deliveries: s.deliveries, CandidateArchives: s.candidateArchives, ComparisonSettings: s.comparisonSettings, PublishGroups: s.publishGroups}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -104,6 +111,15 @@ func archiveList(archives map[string]flow.CandidateArchive) []flow.CandidateArch
 	for _, archive := range archives {
 		list = append(list, archive)
 	}
+	return list
+}
+
+func groupList(groups map[string]flow.PublishGroup) []flow.PublishGroup {
+	list := make([]flow.PublishGroup, 0, len(groups))
+	for _, group := range groups {
+		list = append(list, group)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
 	return list
 }
 
@@ -313,6 +329,120 @@ func buildMux(store *store, staticDir string) *http.ServeMux {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"comparison": state})
 	})
+	mux.HandleFunc("POST /api/projects/{id}/publish-groups", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		var body struct {
+			NodeIDs      []string                      `json:"nodeIds"`
+			Dependencies []flow.PublishGroupDependency `json:"dependencies"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "发布组请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		project, ok := store.projects[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		group, err := flow.CreatePublishGroup(store.deliveries[id], body.NodeIDs, body.Dependencies, newGroupID(), newRunID(), flow.ProjectVersion(project))
+		if err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error(), "publishGroups": groupList(store.publishGroups[id])})
+			return
+		}
+		if store.publishGroups[id] == nil {
+			store.publishGroups[id] = map[string]flow.PublishGroup{}
+		}
+		store.publishGroups[id][group.ID] = *group
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"group": group, "publishGroups": groupList(store.publishGroups[id])})
+	})
+	mux.HandleFunc("POST /api/projects/{id}/publish-groups/{gid}/confirm", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		gid := request.PathValue("gid")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		project, ok := store.projects[id]
+		if !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		group, exists := store.publishGroups[id][gid]
+		if !exists {
+			writeError(w, http.StatusNotFound, "发布组不存在")
+			return
+		}
+		if store.candidateArchives[id] == nil {
+			store.candidateArchives[id] = map[string]flow.CandidateArchive{}
+		}
+		updated, err := flow.ConfirmPublishGroup(store.deliveries[id], store.candidateArchives[id], &group, store.receiverDown[id], flow.ProjectVersion(project), newRunID())
+		store.deliveries[id] = updated
+		store.publishGroups[id][gid] = group
+		// 无论推进、中止还是停留在提交中，都立即持久化：
+		// 页面刷新或重试后看到的状态一致，不会重复发布。
+		if saveErr := store.saveLocked(); saveErr != nil {
+			writeError(w, http.StatusInternalServerError, saveErr.Error())
+			return
+		}
+		payload := map[string]any{"group": group, "publishGroups": groupList(store.publishGroups[id]), "deliveries": updated, "candidateArchives": archiveList(store.candidateArchives[id])}
+		if err != nil {
+			payload["error"] = err.Error()
+			writeJSON(w, http.StatusConflict, payload)
+			return
+		}
+		writeJSON(w, http.StatusOK, payload)
+	})
+	mux.HandleFunc("POST /api/projects/{id}/publish-groups/{gid}/cancel", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		gid := request.PathValue("gid")
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "请先保存工程")
+			return
+		}
+		group, exists := store.publishGroups[id][gid]
+		if !exists {
+			writeError(w, http.StatusNotFound, "发布组不存在")
+			return
+		}
+		if err := flow.CancelPublishGroup(&group); err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "group": group, "publishGroups": groupList(store.publishGroups[id])})
+			return
+		}
+		store.publishGroups[id][gid] = group
+		if err := store.saveLocked(); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"group": group, "publishGroups": groupList(store.publishGroups[id])})
+	})
+	mux.HandleFunc("PUT /api/projects/{id}/receivers/{receiver}/availability", func(w http.ResponseWriter, request *http.Request) {
+		id := request.PathValue("id")
+		receiver := request.PathValue("receiver")
+		var body struct {
+			Available bool `json:"available"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, "可用性请求 JSON 无效")
+			return
+		}
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if _, ok := store.projects[id]; !ok {
+			writeError(w, http.StatusNotFound, "工程不存在")
+			return
+		}
+		if store.receiverDown[id] == nil {
+			store.receiverDown[id] = map[string]bool{}
+		}
+		store.receiverDown[id][receiver] = !body.Available
+		writeJSON(w, http.StatusOK, map[string]any{"receiver": receiver, "available": body.Available})
+	})
 	if staticDir != "" {
 		mux.Handle("GET /", spaHandler(staticDir))
 	}
@@ -352,4 +482,8 @@ func getenv(key string, fallback string) string {
 
 func newRunID() string {
 	return "run-" + time.Now().UTC().Format("20060102T150405.000000000")
+}
+
+func newGroupID() string {
+	return "pg-" + time.Now().UTC().Format("20060102T150405.000000000")
 }

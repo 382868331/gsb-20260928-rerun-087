@@ -61,6 +61,15 @@ main { min-height: 0; display: grid; grid-template-columns: 190px 1fr 340px; }
 .evidence-row { display: flex; gap: 8px; padding: 3px 0; border-top: 1px dashed #eef2f7; }
 .evidence-row em { color: #64748b; font-style: normal; }
 .panel-title { display: flex; justify-content: space-between; align-items: center; }
+.group-panel { border-top: 1px solid #dde5ef; }
+.candidate-pick { display: flex; gap: 6px; align-items: center; font-size: 13px; padding: 3px 0; }
+.dep-editor { margin: 8px 0; display: grid; gap: 6px; font-size: 13px; }
+.dep-row { display: flex; gap: 6px; align-items: center; }
+.dep-row input { width: 140px; }
+.delivery-state.group-prepared { color: #1d4ed8; }
+.delivery-state.group-committing { color: #b45309; }
+.delivery-state.group-committed { color: #15803d; }
+.delivery-state.group-aborted, .delivery-state.group-cancelled { color: #b91c1c; }
 .table-wrap { max-height: 105px; overflow: auto; border: 1px solid #e2e8f0; }
 table { border-collapse: collapse; width: 100%; font-size: 12px; }
 th, td { border-bottom: 1px solid #e2e8f0; padding: 5px 8px; text-align: left; white-space: nowrap; }

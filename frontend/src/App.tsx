@@ -7,8 +7,9 @@ import { DataPanel } from "./components/DataPanel";
 import { CandidateComparison } from "./components/CandidateComparison";
 import { Inspector } from "./components/Inspector";
 import { PublishPanel } from "./components/PublishPanel";
+import { PublishGroupPanel } from "./components/PublishGroupPanel";
 import { StepNode, type StepNodeData } from "./components/StepNode";
-import type { CandidateArchive, CandidateComparisonState, ComponentDef, DeliveryState, Issue, Project, RunResult, Validation } from "./types";
+import type { CandidateArchive, CandidateComparisonState, ComponentDef, DeliveryState, Issue, Project, PublishGroup, PublishGroupDependency, RunResult, Validation } from "./types";
 
 const nodeTypes = { step: StepNode };
 
@@ -28,6 +29,8 @@ export default function App() {
   const [deliveries, setDeliveries] = useState<Record<string, DeliveryState>>({});
   const [candidateArchives, setCandidateArchives] = useState<CandidateArchive[]>([]);
   const [comparisonState, setComparisonState] = useState<CandidateComparisonState>();
+  const [publishGroups, setPublishGroups] = useState<PublishGroup[]>([]);
+  const [receiverDown, setReceiverDown] = useState<Record<string, boolean>>({});
   const [confirming, setConfirming] = useState(false);
   const [dirtyIds, setDirtyIds] = useState<Set<string>>(new Set());
   const staleIds = useMemo(() => downstreamIds(project, [...dirtyIds]), [project, dirtyIds]);
@@ -112,6 +115,8 @@ export default function App() {
     setDeliveries({});
     setCandidateArchives([]);
     setComparisonState(undefined);
+    setPublishGroups([]);
+    setReceiverDown({});
     setValidation(undefined);
     setDirtyIds(new Set());
     setSavedSnapshot(undefined);
@@ -225,6 +230,7 @@ export default function App() {
       setDeliveries(loaded.deliveries ?? {});
       setCandidateArchives(loaded.candidateArchives ?? []);
       setComparisonState(loaded.comparison);
+      setPublishGroups(loaded.publishGroups ?? []);
       const results: RunResult["results"] = {};
       Object.values(loaded.artifacts ?? {}).forEach((artifact) => { results[artifact.nodeId] = { nodeId: artifact.nodeId, status: "reused", artifact, reusedFrom: artifact.runId }; });
       setRun({ ok: true, runId: "saved-artifacts", projectVersion: "", affectedNodeIds: [], results });
@@ -236,6 +242,40 @@ export default function App() {
       setMessage("已重新打开保存的工程、版本化产物与各接收方投递状态。");
     } catch { setMessage("还没有可打开的已保存工程。"); }
   }
+
+  function applyGroupResponse(response: { group?: PublishGroup; publishGroups?: PublishGroup[]; deliveries?: Record<string, DeliveryState>; candidateArchives?: CandidateArchive[]; error?: string }, okMessage: string) {
+    if (response.publishGroups) setPublishGroups(response.publishGroups);
+    if (response.deliveries) setDeliveries(response.deliveries);
+    if (response.candidateArchives) setCandidateArchives(response.candidateArchives);
+    setMessage(response.error ? "发布组未发布：" + response.error : okMessage);
+  }
+
+  async function groupAction(action: () => Promise<Parameters<typeof applyGroupResponse>[0]>, okMessage: string) {
+    setConfirming(true);
+    try {
+      applyGroupResponse(await action(), okMessage);
+    } catch (error) {
+      setMessage("发布组操作失败：" + (error instanceof Error ? error.message : "后端不可用") + "，状态未变更。");
+    } finally {
+      setConfirming(false);
+    }
+  }
+
+  const createGroup = (nodeIds: string[], dependencies: PublishGroupDependency[]) =>
+    groupAction(() => api.createPublishGroup(project.id, { nodeIds, dependencies }), "发布组已组成（准备中）：确认前将共同校验依据、候选齐全与依赖版本。");
+  const confirmGroup = (groupId: string) =>
+    groupAction(() => api.confirmPublishGroup(project.id, groupId), "发布组已完成，整组对接收方可见。");
+  const cancelGroup = (groupId: string) =>
+    groupAction(() => api.cancelPublishGroup(project.id, groupId), "发布组已取消，整组未发布。");
+  const toggleReceiver = async (receiver: string, available: boolean) => {
+    setReceiverDown((current) => ({ ...current, [receiver]: !available }));
+    try {
+      await api.setReceiverAvailability(project.id, receiver, available);
+    } catch {
+      setReceiverDown((current) => ({ ...current, [receiver]: available }));
+      setMessage("接收方可用性切换失败：后端不可用。");
+    }
+  };
 
   const issues: Issue[] = validation?.issues ?? run?.issues ?? [];
   return <div className="app-shell">
@@ -253,6 +293,7 @@ export default function App() {
     <div className="bottom-panels">
       <DataPanel project={project} selectedId={selectedId} run={run} />
       <PublishPanel project={project} run={run} deliveries={deliveries} confirming={confirming} onConfirmAll={() => confirm({ all: true })} onConfirmOne={(nodeId) => confirm({ nodeIds: [nodeId] })} />
+      <PublishGroupPanel project={project} deliveries={deliveries} groups={publishGroups} receiverDown={receiverDown} busy={confirming} onCreate={createGroup} onConfirm={confirmGroup} onCancel={cancelGroup} onToggleReceiver={toggleReceiver} />
     </div>
     <CandidateComparison archives={candidateArchives} savedState={comparisonState} onSave={async (state) => {
       const saved = await api.saveComparison(project.id, state);

@@ -115,6 +115,128 @@ func TestStaticSpaFallback(t *testing.T) {
 	}
 }
 
+func threeReceiverHTTPProject() flow.Project {
+	return flow.Project{
+		Format: "dataflow.project/v1", ID: "pg-http", Name: "发布组测试",
+		Nodes: []flow.Node{
+			{ID: "in", Type: "file_input", Name: "输入", Params: map[string]any{"fileName": "a.csv", "format": "csv", "content": "id,city\n1,S\n2,B"}},
+			{ID: "pub-a", Type: "publish", Name: "发布财务", Params: map[string]any{"receiver": "财务"}},
+			{ID: "pub-b", Type: "publish", Name: "发布运营", Params: map[string]any{"receiver": "运营"}},
+			{ID: "pub-c", Type: "publish", Name: "发布人事", Params: map[string]any{"receiver": "人事"}},
+		},
+		Edges: []flow.Edge{
+			{ID: "ea", Source: "in", Target: "pub-a", SourcePort: "rows", TargetPort: "rows"},
+			{ID: "eb", Source: "in", Target: "pub-b", SourcePort: "rows", TargetPort: "rows"},
+			{ID: "ec", Source: "in", Target: "pub-c", SourcePort: "rows", TargetPort: "rows"},
+		},
+	}
+}
+
+func TestPublishGroupLifecycleOverHTTP(t *testing.T) {
+	directory := t.TempDir()
+	store, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := buildMux(store, "")
+	encoded, _ := json.Marshal(threeReceiverHTTPProject())
+	request := httptest.NewRequest(http.MethodPost, "/api/projects", bytes.NewReader(encoded))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("save status = %d", response.Code)
+	}
+	if response = postJSON(handler, "/api/projects/pg-http/run", `{"startNodeIds":[]}`); response.Code != http.StatusOK {
+		t.Fatalf("run status = %d", response.Code)
+	}
+	// 三接收方循环依赖：组成发布组被拒绝。
+	cycle := `{"nodeIds":["pub-a","pub-b","pub-c"],"dependencies":[` +
+		`{"receiver":"财务","onReceiver":"运营","version":"x"},` +
+		`{"receiver":"运营","onReceiver":"人事","version":"y"},` +
+		`{"receiver":"人事","onReceiver":"财务","version":"z"}]}`
+	if response = postJSON(handler, "/api/projects/pg-http/publish-groups", cycle); response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("cyclic dependency status = %d, want 422", response.Code)
+	}
+	// 正常组成发布组。
+	response = postJSON(handler, "/api/projects/pg-http/publish-groups", `{"nodeIds":["pub-a","pub-b","pub-c"],"dependencies":[]}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("create group status = %d, body %s", response.Code, response.Body.String())
+	}
+	var created struct {
+		Group flow.PublishGroup `json:"group"`
+	}
+	json.NewDecoder(response.Body).Decode(&created)
+	groupID := created.Group.ID
+	if created.Group.Status != flow.GroupPrepared {
+		t.Fatalf("group status = %s, want prepared", created.Group.Status)
+	}
+	// 提交期间 运营 接收方暂时不可用：组停留在提交中，且不能取消。
+	request = httptest.NewRequest(http.MethodPut, "/api/projects/pg-http/receivers/运营/availability", bytes.NewBufferString(`{"available":false}`))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("availability status = %d", response.Code)
+	}
+	response = postJSON(handler, "/api/projects/pg-http/publish-groups/"+groupID+"/confirm", `{}`)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("interrupted confirm status = %d, want 409", response.Code)
+	}
+	var interrupted struct {
+		Group      flow.PublishGroup             `json:"group"`
+		Deliveries map[string]flow.DeliveryState `json:"deliveries"`
+	}
+	json.NewDecoder(response.Body).Decode(&interrupted)
+	if interrupted.Group.Status != flow.GroupCommitting {
+		t.Fatalf("group status = %s, want committing", interrupted.Group.Status)
+	}
+	if interrupted.Deliveries["pub-b"].Published != nil {
+		t.Fatal("不可用接收方不应出现新版本")
+	}
+	if response = postJSON(handler, "/api/projects/pg-http/publish-groups/"+groupID+"/cancel", `{}`); response.Code != http.StatusConflict {
+		t.Fatalf("cancel during commit status = %d, want 409", response.Code)
+	}
+	// 恢复可用后重试：组到达确定结局，已完成接收方不重复发布。
+	request = httptest.NewRequest(http.MethodPut, "/api/projects/pg-http/receivers/运营/availability", bytes.NewBufferString(`{"available":true}`))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	response = postJSON(handler, "/api/projects/pg-http/publish-groups/"+groupID+"/confirm", `{}`)
+	if response.Code != http.StatusOK {
+		t.Fatalf("recovered confirm status = %d, body %s", response.Code, response.Body.String())
+	}
+	var recovered struct {
+		Group      flow.PublishGroup             `json:"group"`
+		Deliveries map[string]flow.DeliveryState `json:"deliveries"`
+	}
+	json.NewDecoder(response.Body).Decode(&recovered)
+	if recovered.Group.Status != flow.GroupCommitted || len(recovered.Group.Outcomes) != 3 {
+		t.Fatalf("recovered group = %s outcomes %d", recovered.Group.Status, len(recovered.Group.Outcomes))
+	}
+	for _, nodeID := range []string{"pub-a", "pub-b", "pub-c"} {
+		publishedEvents := 0
+		for _, event := range recovered.Deliveries[nodeID].History {
+			if event.Kind == flow.EventPublished {
+				publishedEvents++
+			}
+		}
+		if publishedEvents != 1 || recovered.Deliveries[nodeID].Published == nil {
+			t.Fatalf("%s 重试不得重复发布: %#v", nodeID, recovered.Deliveries[nodeID])
+		}
+	}
+	// 幂等：页面刷新后重复确认不再改变状态。
+	if response = postJSON(handler, "/api/projects/pg-http/publish-groups/"+groupID+"/confirm", `{}`); response.Code != http.StatusOK {
+		t.Fatalf("idempotent confirm status = %d", response.Code)
+	}
+	// 重启后发布组与采用候选身份保留。
+	reloaded, err := newStore(filepath.Join(directory, "store.json"), filepath.Join(directory, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := reloaded.publishGroups["pg-http"][groupID]
+	if persisted.Status != flow.GroupCommitted || len(persisted.Outcomes) != 3 {
+		t.Fatalf("persisted group = %#v", persisted)
+	}
+}
+
 func publishTestProject() flow.Project {
 	return flow.Project{
 		Format: "dataflow.project/v1", ID: "pub-http", Name: "发布测试",
